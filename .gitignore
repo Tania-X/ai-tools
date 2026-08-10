@@ -1,0 +1,26 @@
+# 依赖与构建
+vendor/
+dist/
+build/
+*.exe
+
+# 环境与密钥(绝不提交)
+.env
+.env.*
+*.pem
+*key*
+!*.key.example
+
+# 日志与临时
+*.log
+tmp/
+*.tmp
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# 测试产物
+coverage/
+test-results/
