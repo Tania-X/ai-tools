@@ -12,3 +12,6 @@ venv/
 
 # 系统
 .DS_Store
+
+# WorkBuddy 本地工具数据
+.workbuddy/
