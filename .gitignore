@@ -1,26 +1,14 @@
-# 依赖与构建
-vendor/
-dist/
-build/
-*.exe
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
 
-# 环境与密钥(绝不提交)
+# 环境变量/密钥
 .env
-.env.*
-*.pem
-*key*
-!*.key.example
+*.key
 
-# 日志与临时
-*.log
-tmp/
-*.tmp
-
-# IDE
-.idea/
-.vscode/
+# 系统
 .DS_Store
-
-# 测试产物
-coverage/
-test-results/

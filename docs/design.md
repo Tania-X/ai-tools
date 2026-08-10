@@ -66,17 +66,17 @@ ai-gateway(LLM 网关, 本仓库子模块或独立模块)
 
 #### gateway（地基，先做）
 
-```go
-// 统一接口:所有 ai-tools 只依赖这一个包
-type Client interface {
-    Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
-}
-// 支持:DeepSeek / Kimi / OpenAI(兼容端点, base_url + api_key 可配)
-// 能力:多 key 轮询、指数退避重试、token/成本统计、超时
+```python
+# 统一接口:所有 ai-tools 只依赖这一个类
+class LLMClient:
+    def chat(self, messages: list[dict], **overrides) -> ChatResponse: ...
+
+# 支持:DeepSeek / Kimi / OpenAI(兼容端点, base_url + api_key 可配)
+# 能力:多 key 轮询、指数退避重试、token/成本统计、超时
 ```
 
-- 技术栈：Go（与 dashboard 一致，复用经验；单二进制部署方便）
-- 配置：环境变量/配置文件（provider、base_url、api_key、model、max_tokens、temperature）
+- 技术栈：Python 3.12+（httpx；AI 生态事实标准，示例/资料最多，开发效率高）
+- 配置：环境变量 + TOML 文件（provider、base_url、api_key、model、max_tokens、temperature）
 
 #### pr-review（第一个可交付）
 
@@ -125,12 +125,22 @@ dashboard 告警 → webhook 推送 → ai-alert-explain 服务
 
 | 项 | 选择 | 理由 |
 |----|------|------|
-| 语言 | Go 1.24+ | 与 dashboard 统一技术栈、部署单二进制、用户已熟 |
+| 语言 | Python 3.12+ | AI 生态事实标准，LLM/MCP 工具链最成熟，开发效率高，Action 零编译 |
 | LLM 接入 | DeepSeek / Kimi（OpenAI 兼容 API） | 便宜、国内可直连、统一协议 |
 | PR 审查载体 | GitHub Actions + 脚本 | 零部署成本，事件驱动 |
 | 服务形态 | 独立 HTTP 服务（alert-explain / ops-query）+ Action（pr-review） | 各模块按需选择 |
-| MCP | 官方 MCP SDK（Go） | 标准协议，AI 助手通用 |
-| 配置 | YAML + 环境变量 | 与现有项目一致 |
+| MCP | Python MCP SDK（fastmcp） | 标准协议，AI 助手通用，注册工具几行搞定 |
+| 配置 | YAML/TOML + 环境变量 | 与现有项目一致 |
+
+### 4.1 语言选型说明（2026-08-11 更新）
+
+> 原方案为 Go（与 dashboard 统一技术栈），已改为 **Python 3.12+**。
+
+- 本项目定位是 **AI 应用开发学习项目**，Python 是 AI 生态的事实标准：LLM SDK、MCP SDK、结构化输出（pydantic）、示例与社区资料均以 Python 为主
+- 全部模块为「小/中」规模，Go 的性能/单二进制优势在本项目不构成收益
+- pr-review 跑在 GitHub Action 里，Python 零编译、官方 setup-python 直接可用
+- dashboard 仍为 Go，两边只通过 HTTP/接口交互，语言不同不影响职责分离
+- 若未来 dashboard 需要内嵌调用本仓库，再单独评估 Go 封装，当前不做
 
 ---
 
@@ -156,12 +166,14 @@ ai-tools/
 ├── docs/
 │   └── design.md          # 本文件
 ├── gateway/               # LLM 统一网关(先做)
-│   ├── client.go
-│   ├── config.go
-│   └── client_test.go
+│   ├── __init__.py
+│   ├── config.py          # 配置:环境变量 + TOML(provider/key/model 等)
+│   ├── client.py          # LLMClient:多 key 轮询、重试、成本统计
+│   └── tests/
+│       └── test_client.py
 ├── pr-review/             # GitHub Action 审查(第二个做)
 │   ├── action.yml
-│   ├── review.go(或 .py)
+│   ├── review.py
 │   └── .ai-review.yaml.example
 ├── alert-explain/         # 告警解读
 ├── log-analyzer/          # 日志分析
