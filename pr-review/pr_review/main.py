@@ -56,13 +56,14 @@ def _has_blocking_issues(cfg: ReviewConfig, result: ReviewResult) -> bool:
 
 
 def _check_title(result: ReviewResult, blocked: bool, cfg: ReviewConfig) -> str:
+    prefix = f"[第{result.review_no}次] " if result.review_no else ""
     if blocked:
         counts = result.severity_counts
         parts = [f"{counts.get('error', 0)} Error", f"{counts.get('warn', 0)} Warn"]
-        return f"存在达到门禁级别({cfg.fail_on_severity})的问题: {', '.join(parts)}"
+        return f"{prefix}存在达到门禁级别({cfg.fail_on_severity})的问题: {', '.join(parts)}"
     if result.has_issues:
-        return "审查通过(未达到门禁级别)"
-    return "审查通过,未发现问题"
+        return f"{prefix}审查通过(未达到门禁级别)"
+    return f"{prefix}审查通过,未发现问题"
 
 
 def _check_summary(result: ReviewResult, cfg: ReviewConfig) -> str:
@@ -136,6 +137,9 @@ def main() -> None:
             context=context,
         )
         result = runner.run()
+
+        # 评审次数: 已有 AI review 数 + 1(显示"第 N 次评审")
+        result.review_no = github.count_ai_reviews() + 1
 
         if not result.has_issues and not result.summaries:
             logger.info("没有审查结果,跳过评论")

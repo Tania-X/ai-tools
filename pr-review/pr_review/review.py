@@ -70,6 +70,8 @@ class ReviewResult:
     total_tokens: int = 0
     model: str = ""
     skipped_files: int = 0
+    # 本次是第几次评审(1 起),0 表示未知(不显示)
+    review_no: int = 0
     # 文件 -> 新增行号集合(用于行内评论定位校验, GitHub 要求 line 必须是被修改的行)
     added_lines: dict[str, set[int]] = field(default_factory=dict)
 
@@ -292,8 +294,11 @@ class ReviewRunner:
     # ------------------------------------------------------------------ 评论生成
     def format_comment(self, result: ReviewResult) -> str:
         """把审查结果渲染成 PR 评论 Markdown。"""
+        header = "## 🤖 AI 代码审查"
+        if result.review_no:
+            header += f" · 第 {result.review_no} 次评审"
         lines: list[str] = [
-            "## 🤖 AI 代码审查",
+            header,
             "",
         ]
         if result.summaries:

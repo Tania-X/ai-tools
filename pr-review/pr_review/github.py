@@ -28,6 +28,10 @@ class PRInfo:
     base_ref: str
 
 
+# 我们发布的 review 评论标识(用于统计"第 N 次评审")
+REVIEW_MARKER = "🤖 AI 代码审查"
+
+
 class GitHubError(Exception):
     """GitHub API 调用失败。"""
 
@@ -128,6 +132,26 @@ class GitHubClient:
         if title or summary:
             payload["output"] = {"title": title, "summary": summary}
         return self._post(f"/repos/{self.repo}/check-runs", payload)
+
+    # ------------------------------------------------------------------ 评审次数
+    def count_ai_reviews(self) -> int:
+        """统计该 PR 上已发布的 AI review 条数(按 REVIEW_MARKER 过滤 body)。
+
+        用于显示"第 N 次评审":本次次数 = count + 1。
+        只数我们发的(review body 含固定标识),不影响用户手动发的 review。
+        """
+        count = 0
+        page = 1
+        while True:
+            batch = self._get(
+                f"/repos/{self.repo}/pulls/{self.pr_number}/reviews",
+                params={"per_page": 100, "page": page},
+            )
+            count += sum(1 for r in batch if REVIEW_MARKER in (r.get("body") or ""))
+            if len(batch) < 100:
+                break
+            page += 1
+        return count
 
     # ------------------------------------------------------------------ 内部
     def _get(self, path: str, params: dict | None = None) -> Any:

@@ -326,3 +326,22 @@ def test_inline_body_includes_evidence_and_review_flag():
     assert "需人工确认" in body
     assert "spec 中 string vs enum" in body
     assert "🔴" in body
+
+
+# ---------------------------------------------------------------- 评审次数显示
+def test_format_comment_shows_review_number():
+    from pr_review.review import ReviewResult
+
+    result = ReviewResult(model="deepseek-chat", review_no=3)
+    runner, _, _ = _make_runner(files=[])
+    comment = runner.format_comment(result)
+    assert "第 3 次评审" in comment
+    assert comment.startswith("## 🤖 AI 代码审查 · 第 3 次评审")
+
+
+def test_format_comment_no_number_when_unknown():
+    from pr_review.review import ReviewResult
+
+    result = ReviewResult(model="deepseek-chat")  # review_no 默认 0
+    runner, _, _ = _make_runner(files=[])
+    assert "次评审" not in runner.format_comment(result)
