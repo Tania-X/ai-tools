@@ -10,9 +10,9 @@ inputs:
     required: false
     default: ""
   model:
-    description: "模型名,默认取 gateway 配置"
+    description: "模型名,默认 deepseek-chat(用 kimi/openai 时需显式传)"
     required: false
-    default: ""
+    default: "deepseek-chat"
   provider:
     description: "provider 名(deepseek / kimi / openai),默认 deepseek"
     required: false
