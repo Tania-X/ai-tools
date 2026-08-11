@@ -29,6 +29,11 @@ ignore_paths:
 # 只发出达到该级别及以上的问题(error > warn > info)。初版建议 warn,嫌吵改 error。
 min_severity: "warn"
 
+# 合并门禁:存在达到该级别及以上的问题时, check-run 失败 + job exit 1(PR 变红)
+#   error: 只有 error 拦(推荐) | warn: warn 也拦 | off: 永不拦(只发评论)
+# 配合 GitHub 分支保护规则"Require status checks"勾选 AI Review 即可阻止合并。
+fail_on_severity: "error"
+
 # 切片:大 PR 按批审,控制单次 prompt token 与成本
 max_files_per_batch: 20
 

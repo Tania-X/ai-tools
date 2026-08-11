@@ -50,6 +50,9 @@ class ReviewConfig:
     )
     # 只发出达到该级别及以上的问题(error > warn > info)
     min_severity: str = "warn"
+    # 合并门禁:存在达到该级别及以上的问题时, check-run 失败 + job exit 1(PR 变红)
+    #   error: 只有 error 拦(推荐) | warn: warn 也拦 | off: 永不拦(只发评论)
+    fail_on_severity: str = "error"
     # 切片:每批最多文件数(大 PR 分批审,控制单次 prompt token)
     max_files_per_batch: int = 20
     # 单文件 patch 超过该行数则截断(在评论中提示)
@@ -106,6 +109,8 @@ def load_config(path: str | Path | None = None) -> ReviewConfig:
         cfg.ignore_paths = list(ignore)
     if data.get("min_severity") in SEVERITIES:
         cfg.min_severity = data["min_severity"]
+    if data.get("fail_on_severity") in SEVERITIES + ("off",):
+        cfg.fail_on_severity = data["fail_on_severity"]
     cfg.max_files_per_batch = int(data.get("max_files_per_batch", cfg.max_files_per_batch))
     cfg.max_lines_per_file = int(data.get("max_lines_per_file", cfg.max_lines_per_file))
     cfg.show_stats = bool(data.get("show_stats", cfg.show_stats))

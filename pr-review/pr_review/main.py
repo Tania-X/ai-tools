@@ -32,11 +32,48 @@ from gateway import load_config as load_gateway_config  # noqa: E402
 from gateway import LLMClient  # noqa: E402
 
 from pr_review.config import load_config as load_review_config  # noqa: E402
-from pr_review.github import GitHubClient  # noqa: E402
-from pr_review.review import ReviewRunner  # noqa: E402
+from pr_review.config import ReviewConfig  # noqa: E402
+from pr_review.github import GitHubClient, GitHubError  # noqa: E402
+from pr_review.review import ReviewRunner, ReviewResult  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("pr_review.main")
+
+
+def _has_blocking_issues(cfg: ReviewConfig, result: ReviewResult) -> bool:
+    """是否达到合并门禁(fail_on_severity)级别的问题。"""
+    if cfg.fail_on_severity == "off":
+        return False
+    threshold = cfg.severity_rank(cfg.fail_on_severity)
+    return any(
+        cfg.severity_rank(sev) <= threshold and count > 0
+        for sev, count in result.severity_counts.items()
+    )
+
+
+def _check_title(result: ReviewResult, blocked: bool, cfg: ReviewConfig) -> str:
+    if blocked:
+        counts = result.severity_counts
+        parts = [f"{counts.get('error', 0)} Error", f"{counts.get('warn', 0)} Warn"]
+        return f"存在达到门禁级别({cfg.fail_on_severity})的问题: {', '.join(parts)}"
+    if result.has_issues:
+        return "审查通过(未达到门禁级别)"
+    return "审查通过,未发现问题"
+
+
+def _check_summary(result: ReviewResult, cfg: ReviewConfig) -> str:
+    counts = result.severity_counts
+    lines = [
+        f"- 问题统计: {counts['error']} Error / {counts['warn']} Warn / {counts['info']} Info",
+        f"- 批次: {result.batches} | token: {result.total_tokens}",
+    ]
+    if result.total_cost:
+        lines.append(f"- 成本: ¥{result.total_cost:.4f}")
+    if result.skipped_files:
+        lines.append(f"- 跳过文件: {result.skipped_files}")
+    if cfg.fail_on_severity != "off":
+        lines.append(f"- 门禁级别: {cfg.fail_on_severity}(存在达到该级别的问题时本 check 失败)")
+    return "\n".join(lines)
 
 
 def _repo_from_env() -> str:
@@ -88,14 +125,35 @@ def main() -> None:
         pr = github.get_pr_info()
         github.post_review(body=body, head_sha=pr.head_sha)
 
+        # check-run 合并门禁:达到 fail_on_severity 门槛 → failure(check 红)
+        # 注意:权限不足(旧 workflow 无 checks: write)时仅告警,不中断已发布的评论
+        blocked = _has_blocking_issues(review_cfg, result)
+        try:
+            github.create_check_run(
+                "AI Review",
+                head_sha=pr.head_sha,
+                conclusion="failure" if blocked else "success",
+                title=_check_title(result, blocked, review_cfg),
+                summary=_check_summary(result, review_cfg),
+            )
+        except GitHubError as e:
+            logger.warning("创建 check-run 失败(可忽略,评论已发布): %s", e)
+
         logger.info(
-            "PR #%s 审查完成: %d 个问题, %d 批, token=%d, cost=¥%.4f",
+            "PR #%s 审查完成: %d 个问题(error=%d warn=%d), %d 批, token=%d, cost=¥%.4f, blocked=%s",
             pr_number,
             len(result.issues),
+            result.severity_counts["error"],
+            result.severity_counts["warn"],
             result.batches,
             result.total_tokens,
             result.total_cost,
+            blocked,
         )
+
+        if blocked:
+            logger.error("存在达到门禁级别(%s)的问题, job 判定失败", review_cfg.fail_on_severity)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

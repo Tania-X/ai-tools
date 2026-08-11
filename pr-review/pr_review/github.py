@@ -102,6 +102,33 @@ class GitHubClient:
             payload["comments"] = comments
         return self._post(f"/repos/{self.repo}/pulls/{self.pr_number}/reviews", payload)
 
+    # ------------------------------------------------------------------ check-run
+    def create_check_run(
+        self,
+        name: str,
+        head_sha: str,
+        conclusion: str,  # success / failure / neutral / skipped ...
+        *,
+        title: str = "",
+        summary: str = "",
+    ) -> dict:
+        """创建/更新 check-run,供分支保护规则做合并门禁(需 checks: write 权限)。
+
+        conclusion 取值参考:
+            success   通过(未达到门槛)
+            failure   未通过(存在达到门槛的问题, PR 显示红)
+            neutral   不阻塞(仅提示)
+        """
+        payload: dict[str, Any] = {
+            "name": name,
+            "head_sha": head_sha,
+            "status": "completed",
+            "conclusion": conclusion,
+        }
+        if title or summary:
+            payload["output"] = {"title": title, "summary": summary}
+        return self._post(f"/repos/{self.repo}/check-runs", payload)
+
     # ------------------------------------------------------------------ 内部
     def _get(self, path: str, params: dict | None = None) -> Any:
         resp = self._client.get(path, params=params)

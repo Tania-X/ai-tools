@@ -59,6 +59,14 @@ class ReviewResult:
     def has_issues(self) -> bool:
         return bool(self.issues)
 
+    @property
+    def severity_counts(self) -> dict[str, int]:
+        """各严重级别问题数量,供 check-run 门禁判定。"""
+        counts: dict[str, int] = {"error": 0, "warn": 0, "info": 0}
+        for issue in self.issues:
+            counts[issue.severity] = counts.get(issue.severity, 0) + 1
+        return counts
+
 
 class ReviewRunner:
     """pr-review 主流程。按批次切片,每批独立走 LLM,最后汇总发一条评论。"""
