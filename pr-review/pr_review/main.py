@@ -33,6 +33,7 @@ from gateway import LLMClient  # noqa: E402
 
 from pr_review.config import load_config as load_review_config  # noqa: E402
 from pr_review.config import ReviewConfig  # noqa: E402
+from pr_review.context import ContextCollector  # noqa: E402
 from pr_review.github import GitHubClient, GitHubError  # noqa: E402
 from pr_review.review import ReviewRunner, ReviewResult  # noqa: E402
 
@@ -41,13 +42,16 @@ logger = logging.getLogger("pr_review.main")
 
 
 def _has_blocking_issues(cfg: ReviewConfig, result: ReviewResult) -> bool:
-    """是否达到合并门禁(fail_on_severity)级别的问题。"""
+    """是否达到合并门禁(fail_on_severity)级别的问题。
+
+    needs_review=true 的问题(设计意图类不确定判断)不计入门禁——避免误报阻塞合并。
+    """
     if cfg.fail_on_severity == "off":
         return False
     threshold = cfg.severity_rank(cfg.fail_on_severity)
     return any(
-        cfg.severity_rank(sev) <= threshold and count > 0
-        for sev, count in result.severity_counts.items()
+        not issue.needs_review and cfg.severity_rank(issue.severity) <= threshold
+        for issue in result.issues
     )
 
 
@@ -113,8 +117,24 @@ def main() -> None:
     # 审查配置:.ai-review.yaml(默认仓库根)
     review_cfg = load_review_config(os.environ.get("AI_REVIEW_CONFIG", ".ai-review.yaml"))
 
+    # 仓库上下文(action 环境 cwd=checkout 的仓库根):约定/契约文档摘要注入 prompt
+    repo_root = os.getcwd()
+    context = ContextCollector(
+        repo_root=repo_root,
+        patterns=review_cfg.context_files,
+        max_chars=review_cfg.max_context_chars,
+    ).collect()
+    if context:
+        logger.info("已收集仓库上下文: %d 字符", len(context))
+
     with GitHubClient(token=token, repo=repo, pr_number=pr_number) as github:
-        runner = ReviewRunner(github=github, llm=llm, config=review_cfg)
+        runner = ReviewRunner(
+            github=github,
+            llm=llm,
+            config=review_cfg,
+            repo_root=repo_root,
+            context=context,
+        )
         result = runner.run()
 
         if not result.has_issues and not result.summaries:

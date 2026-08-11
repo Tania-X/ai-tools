@@ -44,3 +44,27 @@ def test_load_config_from_yaml(tmp_path):
     assert cfg.min_severity == "error"
     assert cfg.max_files_per_batch == 5
     assert cfg.review_focus == ["只关心安全问题"]
+
+
+def test_load_config_v2_fields(tmp_path):
+    f = tmp_path / ".ai-review.yaml"
+    f.write_text(
+        "fail_on_severity: warn\n"
+        "context_files:\n  - AGENTS.md\n  - spec/**\n"
+        "max_context_chars: 4000\n"
+        "ignore_generated: false\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(f)
+    assert cfg.fail_on_severity == "warn"
+    assert cfg.context_files == ["AGENTS.md", "spec/**"]
+    assert cfg.max_context_chars == 4000
+    assert cfg.ignore_generated is False
+
+
+def test_default_v2_fields():
+    cfg = DEFAULT_CONFIG
+    assert "AGENTS.md" in cfg.context_files
+    assert "README.md" in cfg.context_files
+    assert cfg.ignore_generated is True
+    assert cfg.max_context_chars > 0

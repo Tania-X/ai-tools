@@ -13,10 +13,11 @@ def _result(*issues: ReviewIssue) -> ReviewResult:
     return r
 
 
-def _issue(severity: str) -> ReviewIssue:
+def _issue(severity: str, needs_review: bool = False) -> ReviewIssue:
     return ReviewIssue(
         file="a.py", line=1, severity=severity,
         title="t", detail="d", suggestion="s",
+        needs_review=needs_review,
     )
 
 
@@ -27,6 +28,17 @@ def test_block_on_error_by_default():
     # 只有 warn 不拦
     assert not _has_blocking_issues(cfg, _result(_issue("warn")))
     assert not _has_blocking_issues(cfg, _result(_issue("info")))
+
+
+def test_needs_review_never_blocks():
+    """AI 不确定(needs_review)的问题不计入门禁,避免误报阻塞合并。"""
+    cfg = ReviewConfig(fail_on_severity="error")
+    assert not _has_blocking_issues(cfg, _result(_issue("error", needs_review=True)))
+    assert not _has_blocking_issues(cfg, _result(_issue("warn", needs_review=True)))
+    # 混合: 确定的 error 仍然拦
+    assert _has_blocking_issues(
+        cfg, _result(_issue("error", needs_review=True), _issue("error"))
+    )
 
 
 def test_block_on_warn_when_configured():

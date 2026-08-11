@@ -40,6 +40,16 @@ def test_build_messages_structure():
     assert "Hello" in user  # diff 内容进入 prompt
 
 
+def test_system_prompt_v2_discipline():
+    """v2 判断纪律: 不假设接口参数/状态管理, 需证据, 显式类型一致性检查。"""
+    system = build_messages(PR, [], DEFAULT_CONFIG)[0]["content"]
+    assert "结合仓库上下文中的后端接口定义" in system  # 契约判断
+    assert "只有看到证据才下结论" in system            # 状态管理证据
+    assert "needs_review" in system                    # 不确定标记
+    assert "同名字段的类型是否一致" in system           # 显式类型一致性
+    assert "evidence" in system                         # 判断依据
+
+
 def test_build_messages_batch_note():
     fd = parse_diff(SAMPLE_DIFF)[0]
     messages = build_messages(PR, [fd], DEFAULT_CONFIG, batch_no=1, batch_total=2)
