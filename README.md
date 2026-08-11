@@ -84,3 +84,4 @@ jobs:
 - [设计文档](docs/design.md) — 架构、模块规划、技术选型、学习路径
 - [pr-review 使用指南](docs/pr-review.md) — 实现原理、前提条件、手动配置流程、配置项参考
 - [P1 质量门禁方案](docs/pr-review-quality-gate.md) — LLM-as-judge 打分 + 自检重写(规划,未实现)
+- [P2 描述自动补全方案](docs/pr-review-desc-autofill.md) — 创建 PR 后 AI 自动生成 title/description(规划,未实现)
