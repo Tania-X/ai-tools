@@ -89,6 +89,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
         )
 
     # 环境变量:单 provider 快捷配置(适合 GitHub Action 场景)
+    # 注意:环境变量存在但为空串时不得覆盖默认值(GitHub Action 会把空 input 注入为空 env)
     env_name = os.environ.get("AI_GATEWAY_PROVIDER")
     if env_name:
         cfg.default_provider = env_name
@@ -97,13 +98,21 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
         )
     provider = cfg.providers.get(cfg.default_provider)
     if provider:
-        provider.base_url = os.environ.get("AI_GATEWAY_BASE_URL", provider.base_url)
+        base_url = os.environ.get("AI_GATEWAY_BASE_URL")
+        if base_url:
+            provider.base_url = base_url
         keys = _env_list(os.environ.get("AI_GATEWAY_API_KEYS"))
         if keys:
             provider.api_keys = keys
-        provider.model = os.environ.get("AI_GATEWAY_MODEL", provider.model)
-        provider.max_tokens = int(os.environ.get("AI_GATEWAY_MAX_TOKENS", provider.max_tokens))
-        provider.temperature = float(os.environ.get("AI_GATEWAY_TEMPERATURE", provider.temperature))
+        model = os.environ.get("AI_GATEWAY_MODEL")
+        if model:
+            provider.model = model
+        max_tokens = os.environ.get("AI_GATEWAY_MAX_TOKENS")
+        if max_tokens:
+            provider.max_tokens = int(max_tokens)
+        temperature = os.environ.get("AI_GATEWAY_TEMPERATURE")
+        if temperature:
+            provider.temperature = float(temperature)
 
     if not cfg.providers:
         raise ValueError(
