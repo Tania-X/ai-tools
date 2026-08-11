@@ -103,6 +103,28 @@ def _pr_number_from_event() -> int:
     return int(number)
 
 
+def _mode_from_event() -> str:
+    """按事件类型区分运行模式: review(PR 审查) / reply(线程回复)。"""
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    return "reply" if event_name == "pull_request_review_comment" else "review"
+
+
+def _handle_reply_event(github: GitHubClient, llm: LLMClient) -> None:
+    """处理用户对 AI 审查评论的线程回复(简洁回答)。"""
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not event_path or not Path(event_path).is_file():
+        raise SystemExit("缺少 GITHUB_EVENT_PATH")
+    with open(event_path, "r", encoding="utf-8") as f:
+        event = json.load(f)
+    comment = event.get("comment") or {}
+    from .reply import ReplyHandler
+
+    if ReplyHandler(github=github, llm=llm).handle(comment):
+        logger.info("已回复线程评论 #%s", comment.get("id"))
+    else:
+        logger.info("无回复动作(非 AI 线程 / Bot 评论 / 非回复)")
+
+
 def main() -> None:
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
@@ -114,6 +136,12 @@ def main() -> None:
     # gateway 配置:AI_GATEWAY_CONFIG TOML 或 AI_GATEWAY_* 环境变量
     gw_cfg = load_gateway_config()
     llm = LLMClient(gw_cfg)
+
+    # 回复模式:不跑审查,只回应线程(简洁,无需 review 配置/上下文)
+    if _mode_from_event() == "reply":
+        with GitHubClient(token=token, repo=repo, pr_number=pr_number) as github:
+            _handle_reply_event(github, llm)
+        return
 
     # 审查配置:.ai-review.yaml(默认仓库根)
     review_cfg = load_review_config(os.environ.get("AI_REVIEW_CONFIG", ".ai-review.yaml"))

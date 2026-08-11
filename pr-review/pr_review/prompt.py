@@ -16,7 +16,36 @@ from typing import Any
 
 from .config import ReviewConfig
 from .diff import FileDiff
-from .github import PRInfo
+from .github import PRInfo, REVIEW_MARKER
+
+# 回复模式(P0 交互):用户在行内评论线程回复时,AI 在此线程内简洁回答
+REPLY_SYSTEM_PROMPT = """你是 PR 审查助手,正在回应开发者对某条审查意见的回复。
+要求:
+- 回复务必简洁:不超过 3 句话(约 150 字),直接回答,不要复述问题、不要客套
+- 只针对开发者的问题/质疑回答:解释判断依据、承认误报、或补充具体修改建议
+- 若开发者说明这是设计意图或已解决,表示确认并简短说明,不要强辩、不要重复报
+- 纯文本回答,不要输出 JSON 或代码块(除非确实需要一小段代码示意)
+"""
+
+
+def build_reply_messages(thread: list[dict]) -> list[dict[str, str]]:
+    """组装回复对话:线程对话历史(旧→新)+ 用户最新回复。
+
+    thread: [{id, body, user:{login}, in_reply_to_id}, ...] 按时间正序。
+    """
+    parts: list[str] = ["## 线程对话历史(旧→新)"]
+    for c in thread:
+        body = c.get("body", "")
+        if REVIEW_MARKER in body:
+            author = "AI 审查"
+        else:
+            author = (c.get("user") or {}).get("login", "开发者")
+        parts.append(f"**{author}**: {body}")
+    user_content = "\n\n".join(parts)
+    return [
+        {"role": "system", "content": REPLY_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
 
 SYSTEM_PROMPT = """你是一位资深代码审查专家,正在审查一个 Pull Request。
 你只依据提供的 diff 与仓库上下文给出**真实、具体、可执行**的审查意见,遵循以下规则:

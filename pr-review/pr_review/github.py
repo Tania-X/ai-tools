@@ -153,6 +153,30 @@ class GitHubClient:
             page += 1
         return count
 
+    # ------------------------------------------------------------------ 行内评论线程(交互)
+    def get_pull_comments(self, per_page: int = 100) -> list[dict]:
+        """分页拉取 PR 全部行内评论(review comments, 含 in_reply_to_id 线程关系)。"""
+        comments: list[dict] = []
+        page = 1
+        while True:
+            batch = self._get(
+                f"/repos/{self.repo}/pulls/{self.pr_number}/comments",
+                params={"per_page": per_page, "page": page},
+            )
+            comments.extend(batch)
+            if len(batch) < per_page:
+                break
+            page += 1
+        return comments
+
+    def post_pull_comment(self, body: str, *, in_reply_to: int) -> dict:
+        """在行内评论线程里回复(in_reply_to 指向被回复的评论 id, 形成对话线程)。
+
+        回复已有评论时无需 path/line,位置继承原评论。
+        """
+        payload: dict[str, Any] = {"body": body, "in_reply_to": in_reply_to}
+        return self._post(f"/repos/{self.repo}/pulls/{self.pr_number}/comments", payload)
+
     # ------------------------------------------------------------------ 内部
     def _get(self, path: str, params: dict | None = None) -> Any:
         resp = self._client.get(path, params=params)
