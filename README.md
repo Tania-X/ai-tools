@@ -82,3 +82,4 @@ jobs:
 ## 文档
 
 - [设计文档](docs/design.md) — 架构、模块规划、技术选型、学习路径
+- [pr-review 使用指南](docs/pr-review.md) — 实现原理、前提条件、手动配置流程、配置项参考
