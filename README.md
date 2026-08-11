@@ -41,7 +41,11 @@ jobs:
 
 1. 仓库根放 `.ai-review.yaml`(可复制 [pr-review/.ai-review.yaml.example](pr-review/.ai-review.yaml.example))
 2. 配置一个 OpenAI 兼容 API key 的 Secret
-3. 打开 PR 即可看到审查评论(整体评论,JSON 结构化,含文件+行号)
+3. 打开 PR 即可看到审查结果:
+   - **整体评论**: summary + 问题清单 + token/成本统计
+   - **行内评论线程**: 每个可定位的问题挂在 diff 对应行上, 可直接在行上回复讨论
+   - **check-run 门禁**: 存在达到 `fail_on_severity`(默认 error)级别的问题时 PR 变红,
+     配合分支保护规则可阻止合并; AI 不确定(needs_review)的问题不计入门禁
 
 ## 接入其他仓库(Checklist)
 

@@ -271,3 +271,58 @@ def test_context_injected_into_prompt():
     # 不注入时没有该段
     msgs2 = build_messages(PR, [fd], ReviewConfig())
     assert "仓库上下文" not in msgs2[1]["content"]
+
+
+# ---------------------------------------------------------------- 行内评论线程
+def test_build_inline_comments_basic():
+    """issue 行号落在 diff 新增行 → 生成行内评论线程。"""
+    runner, _, _ = _make_runner()  # FILE_ITEM: src/auth.py 新增行 11
+    result = runner.run()
+    comments = runner.build_inline_comments(result)
+    assert len(comments) == 1
+    c = comments[0]
+    assert c["path"] == "src/auth.py"
+    assert c["line"] == 11
+    assert c["side"] == "RIGHT"
+    assert "建议使用 get 获取参数" in c["body"]
+    assert "💡" in c["body"]
+
+
+def test_build_inline_comments_skips_unchanged_line():
+    """行号不在新增行集合(LLM 给了上下文行)→ 降级留整体评论, 不建线程。"""
+    responses = [
+        '{"summary": "s", "issues": [{"file": "src/auth.py", "line": 10, '
+        '"severity": "warn", "title": "上下文行问题", "detail": "d", "suggestion": "s"}]}'
+    ]
+    runner, _, _ = _make_runner(llm_responses=responses)
+    result = runner.run()
+    assert len(result.issues) == 1
+    assert runner.build_inline_comments(result) == []  # 行 10 是上下文行
+
+
+def test_build_inline_comments_skips_no_line():
+    """line=0(无法定位)→ 降级。"""
+    responses = [
+        '{"summary": "s", "issues": [{"file": "src/auth.py", "severity": "info", '
+        '"title": "无行号问题", "detail": "d", "suggestion": "s"}]}'
+    ]
+    runner, _, _ = _make_runner(llm_responses=responses)
+    result = runner.run()
+    assert runner.build_inline_comments(result) == []
+
+
+def test_inline_body_includes_evidence_and_review_flag():
+    from pr_review.review import ReviewResult
+
+    result = ReviewResult()
+    result.issues = [
+        ReviewIssue(
+            file="a.py", line=1, severity="error", title="类型不一致", detail="d",
+            suggestion="s", evidence="spec 中 string vs enum", needs_review=True,
+        )
+    ]
+    runner, _, _ = _make_runner(files=[])
+    body = runner._inline_body(result.issues[0])
+    assert "需人工确认" in body
+    assert "spec 中 string vs enum" in body
+    assert "🔴" in body

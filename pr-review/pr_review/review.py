@@ -70,6 +70,8 @@ class ReviewResult:
     total_tokens: int = 0
     model: str = ""
     skipped_files: int = 0
+    # 文件 -> 新增行号集合(用于行内评论定位校验, GitHub 要求 line 必须是被修改的行)
+    added_lines: dict[str, set[int]] = field(default_factory=dict)
 
     @property
     def has_issues(self) -> bool:
@@ -150,6 +152,9 @@ class ReviewRunner:
             return ReviewResult(skipped_files=skipped)
 
         result = ReviewResult(model=self.llm.config.get().model, skipped_files=skipped)
+        # 记录每个文件的新增行号集合,供行内评论定位校验
+        for fd in candidates:
+            result.added_lines[fd.path] = {line_no for line_no, _ in fd.added}
         batches = self._batch_files(candidates)
         result.batches = len(batches)
 
@@ -241,6 +246,48 @@ class ReviewRunner:
         except OSError:
             return False
         return any(marker in head for marker in _GENERATED_MARKERS)
+
+    # ------------------------------------------------------------------ 行内评论线程
+    def build_inline_comments(self, result: ReviewResult) -> list[dict]:
+        """生成行内评论线程(GitHub review comments,每条挂在 diff 行上可回复讨论)。
+
+        设计: 整体评论(summary + 问题索引) + 每条可定位问题一个行内线程, 线程里给
+        完整修改建议——开发者可在该行直接回复/AI 继续讨论。
+
+        GitHub API 约束: side=RIGHT 时 line 必须是该文件 diff 中的新增行, 否则 422。
+        行号不在新增行集合内(如 LLM 给的是上下文行)的 issue 降级: 只留在整体评论。
+        """
+        comments: list[dict] = []
+        for issue in result.issues:
+            if not issue.file or not issue.line:
+                continue  # 无行号:留整体评论
+            added = result.added_lines.get(issue.file)
+            if added is None or issue.line not in added:
+                continue  # 行号非新增行:留整体评论(避免 422)
+            comments.append(
+                {
+                    "path": issue.file,
+                    "line": issue.line,
+                    "side": "RIGHT",
+                    "body": self._inline_body(issue),
+                }
+            )
+        return comments
+
+    @staticmethod
+    def _inline_body(issue: ReviewIssue) -> str:
+        """行内评论正文:标题 + 详情 + 建议 + 依据,紧凑格式。"""
+        icon = SEVERITY_ICONS.get(issue.severity, "🔵")
+        parts = [f"{icon} **{issue.title}**"]
+        if issue.needs_review:
+            parts.append("> ⚠️ 需人工确认(设计意图类判断)")
+        if issue.detail:
+            parts.append(issue.detail)
+        if issue.suggestion:
+            parts.append(f"💡 {issue.suggestion}")
+        if issue.evidence:
+            parts.append(f"📎 依据: {issue.evidence}")
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------ 评论生成
     def format_comment(self, result: ReviewResult) -> str:

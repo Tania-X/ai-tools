@@ -142,8 +142,11 @@ def main() -> None:
             return
 
         body = runner.format_comment(result)
+        inline = runner.build_inline_comments(result)
         pr = github.get_pr_info()
-        github.post_review(body=body, head_sha=pr.head_sha)
+        github.post_review(body=body, head_sha=pr.head_sha, comments=inline)
+
+        logger.info("行内评论线程: %d 条(其余问题在整体评论)", len(inline))
 
         # check-run 合并门禁:达到 fail_on_severity 门槛 → failure(check 红)
         # 注意:权限不足(旧 workflow 无 checks: write)时仅告警,不中断已发布的评论
