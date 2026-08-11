@@ -5,6 +5,7 @@ description = "AI × DevOps 工具集 —— 独立 AI 能力层(gateway / pr-re
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",
+    "PyYAML>=6.0",  # pr-review 的 .ai-review.yaml 配置
 ]
 
 [project.optional-dependencies]
@@ -14,4 +15,4 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["gateway/tests"]
+testpaths = ["gateway/tests", "pr-review/tests"]

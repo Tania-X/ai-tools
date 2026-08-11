@@ -1,0 +1,47 @@
+name: "AI PR Review"
+description: "自建 CodeRabbit 替代 —— LLM 审查 PR diff 并发布 review 评论"
+
+inputs:
+  api-key:
+    description: "LLM API key(DeepSeek / Kimi / OpenAI 兼容端点)"
+    required: true
+  base-url:
+    description: "OpenAI 兼容端点,默认按 provider 内置(deepseek/kimi/openai)"
+    required: false
+    default: ""
+  model:
+    description: "模型名,默认取 gateway 配置"
+    required: false
+    default: ""
+  provider:
+    description: "provider 名(deepseek / kimi / openai),默认 deepseek"
+    required: false
+    default: "deepseek"
+  config-path:
+    description: ".ai-review.yaml 路径(相对仓库根)"
+    required: false
+    default: ".ai-review.yaml"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        pip install -q "httpx>=0.27" "PyYAML>=6.0"
+
+    - name: Run AI PR review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        AI_GATEWAY_PROVIDER: ${{ inputs.provider }}
+        AI_GATEWAY_API_KEYS: ${{ inputs.api-key }}
+        AI_GATEWAY_BASE_URL: ${{ inputs.base-url }}
+        AI_GATEWAY_MODEL: ${{ inputs.model }}
+        AI_REVIEW_CONFIG: ${{ inputs.config-path }}
+      run: python "${{ github.action_path }}/pr_review/main.py"

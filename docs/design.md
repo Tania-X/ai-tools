@@ -55,8 +55,8 @@ ai-gateway(LLM 网关, 本仓库子模块或独立模块)
 
 | 模块 | 一句话 | 核心学习点 | 规模 |
 |------|--------|-----------|------|
-| **gateway** | LLM 统一网关：多模型抽象、key 管理、重试、成本统计 | OpenAI 兼容 API、配置、错误处理 | 小 |
-| **pr-review** | GitHub Action：PR 打开时取 diff → LLM 审查 → 发 PR 评论 | GitHub Actions、diff 提取、prompt 工程、GitHub API | 中 |
+| **gateway** | LLM 统一网关：多模型抽象、key 管理、重试、成本统计 | OpenAI 兼容 API、配置、错误处理 | 小 ✅ |
+| **pr-review** | GitHub Action：PR 打开时取 diff → LLM 审查 → 发 PR 评论 | GitHub Actions、diff 提取、prompt 工程、GitHub API | 中 🔧 |
 | **alert-explain** | 告警解读：CPU 95% → LLM 生成可能原因 + 排查建议 | 结构化输出(JSON)、与 webhook 集成 | 中 |
 | **log-analyzer** | 日志分析：异常日志摘要、根因线索 | 文本切片/摘要、上下文管理 | 中 |
 | **ops-query** | 自然语言查指标："昨天 CPU 最高是什么时候" | 意图识别、Tool Use(function calling) | 中大 |
@@ -93,6 +93,13 @@ class LLMClient:
 
 - 关键设计：diff 可能很大，需要切片/摘要；输出结构化为 JSON（文件 + 行号 + 问题 + 建议）
 - 与 CodeRabbit 的关系：自建替代，功能从最小可用起步（先评论，再逐步加）
+
+> 2026-08-11 进展：feat/pr-review 分支已实现最小可用版。
+> - `pr_review/` 包：diff 解析(零依赖) / GitHub API 客户端(httpx) / prompt 组装 / ReviewRunner 编排 / main 入口
+> - 切片：`max_files_per_batch` 分批、`max_lines_per_file` 截断、`ignore_paths` 过滤
+> - 初版发**整体 review 评论**(POST /pulls/{n}/reviews, JSON 结构化含文件+行号)；
+>   `post_review` 已预留行内评论 `comments` 参数,后续增强
+> - 30 个单测通过(mock 网络,零真实调用)
 
 #### alert-explain（最贴合现有项目）
 
@@ -173,8 +180,15 @@ ai-tools/
 │       └── test_client.py
 ├── pr-review/             # GitHub Action 审查(第二个做)
 │   ├── action.yml
-│   ├── review.py
-│   └── .ai-review.yaml.example
+│   ├── .ai-review.yaml.example
+│   ├── pr_review/         # Python 包
+│   │   ├── main.py        # Action 入口(读 GITHUB_EVENT_PATH 编排)
+│   │   ├── github.py      # GitHub API 客户端(取 PR/文件/diff、发评论)
+│   │   ├── diff.py        # unified diff 解析 + 行号/切片(零依赖)
+│   │   ├── prompt.py      # prompt 组装 + LLM JSON 输出容错解析
+│   │   ├── config.py      # .ai-review.yaml 审查配置
+│   │   └── review.py      # ReviewRunner:过滤/切片 → LLM → 评论生成
+│   └── tests/             # 30 个单测(mock 网络)
 ├── alert-explain/         # 告警解读
 ├── log-analyzer/          # 日志分析
 ├── ops-query/             # 自然语言查询
@@ -186,7 +200,7 @@ ai-tools/
 
 ## 七、待定问题
 
-- [ ] gateway 放本仓库子模块还是独立仓库？（倾向：本仓库子模块，先跑起来再说）
-- [ ] pr-review 的 review 深度/噪音控制策略（参考 .coderabbit.yaml 的经验：先 chill）
+- [x] gateway 放本仓库子模块还是独立仓库？（倾向：本仓库子模块，先跑起来再说）→ 已按子模块落地
+- [ ] pr-review 的 review 深度/噪音控制策略（参考 .coderabbit.yaml 的经验：先 chill）→ 已落地 `min_severity` / `ignore_paths` 门槛,待真实验证调参
 - [ ] alert-explain 的触发方式：webhook 直连 vs dashboard 集成
 - [ ] ops-query 的数据源接口是否依赖 dashboard 的 API 契约（需 dashboard 侧配合暴露查询接口）

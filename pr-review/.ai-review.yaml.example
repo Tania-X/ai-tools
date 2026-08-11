@@ -1,0 +1,39 @@
+# pr-review 审查配置示例:复制为仓库根 .ai-review.yaml(或在 Action 中用 config-path 指定)。
+# 所有项均可省略,缺省用内置默认值。哲学:先 chill,控制噪音,再逐步收紧。
+
+# 审查重点(直接作为指令进入 prompt,按重要度排序)
+review_focus:
+  - "bug 与逻辑错误"
+  - "并发/性能隐患"
+  - "安全问题(注入/越权/密钥泄露)"
+  - "资源泄漏(连接/文件未关闭)"
+  - "明显不符合项目既有约定(命名/分层/异常处理)"
+
+# 忽略的路径(glob 匹配,** 递归)。锁文件/构建产物/生成代码通常不需要审。
+ignore_paths:
+  - "**/*.lock"
+  - "**/package-lock.json"
+  - "**/pnpm-lock.yaml"
+  - "**/yarn.lock"
+  - "**/go.sum"
+  - "**/*.min.js"
+  - "**/*.min.css"
+  - "**/vendor/**"
+  - "**/generated/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/target/**"
+  - "**/.idea/**"
+  - "**/.vscode/**"
+
+# 只发出达到该级别及以上的问题(error > warn > info)。初版建议 warn,嫌吵改 error。
+min_severity: "warn"
+
+# 切片:大 PR 按批审,控制单次 prompt token 与成本
+max_files_per_batch: 20
+
+# 单文件 patch 超过该行数则截断(评论中会提示)
+max_lines_per_file: 800
+
+# 评论末尾是否附带模型/token/成本统计
+show_stats: true

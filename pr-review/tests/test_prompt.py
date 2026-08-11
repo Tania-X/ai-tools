@@ -1,0 +1,77 @@
+"""prompt 组装 / JSON 解析单测。"""
+
+import pytest
+
+from pr_review.config import DEFAULT_CONFIG
+from pr_review.diff import parse_diff
+from pr_review.github import PRInfo
+from pr_review.prompt import build_messages, parse_review_json
+
+SAMPLE_DIFF = """diff --git a/src/hello.py b/src/hello.py
+--- a/src/hello.py
++++ b/src/hello.py
+@@ -1,5 +1,6 @@
+ def greet(name):
+-    return "Hello, " + name
++    return f"Hello, {name}"
+"""
+
+PR = PRInfo(
+    number=42,
+    title="feat: 支持 f-string",
+    body="改用 f-string",
+    head_sha="abc123",
+    head_ref="feat/fstring",
+    base_ref="main",
+)
+
+
+def test_build_messages_structure():
+    fd = parse_diff(SAMPLE_DIFF)[0]
+    messages = build_messages(PR, [fd], DEFAULT_CONFIG)
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert "资深代码审查专家" in messages[0]["content"]
+    assert messages[1]["role"] == "user"
+    user = messages[1]["content"]
+    assert "PR #42" in user
+    assert "feat: 支持 f-string" in user
+    assert "src/hello.py" in user
+    assert "Hello" in user  # diff 内容进入 prompt
+
+
+def test_build_messages_batch_note():
+    fd = parse_diff(SAMPLE_DIFF)[0]
+    messages = build_messages(PR, [fd], DEFAULT_CONFIG, batch_no=1, batch_total=2)
+    assert "第 1/2 批" in messages[1]["content"]
+
+
+def test_build_messages_contains_focus():
+    fd = parse_diff(SAMPLE_DIFF)[0]
+    messages = build_messages(PR, [fd], DEFAULT_CONFIG)
+    assert "审查重点" in messages[1]["content"]
+    assert "bug 与逻辑错误" in messages[1]["content"]
+
+
+def test_parse_review_json_plain():
+    raw = '{"summary": "ok", "issues": [{"file": "a.py", "line": 1, "severity": "warn", "title": "t", "detail": "d", "suggestion": "s"}]}'
+    data = parse_review_json(raw)
+    assert data["summary"] == "ok"
+    assert data["issues"][0]["file"] == "a.py"
+
+
+def test_parse_review_json_with_fence():
+    raw = '```json\n{"summary": "ok", "issues": []}\n```'
+    data = parse_review_json(raw)
+    assert data["summary"] == "ok"
+
+
+def test_parse_review_json_with_trailing_text():
+    raw = '{"summary": "ok", "issues": []}\n以上是审查结果。'
+    data = parse_review_json(raw)
+    assert data["summary"] == "ok"
+
+
+def test_parse_review_json_invalid():
+    with pytest.raises(ValueError):
+        parse_review_json("no json here")
