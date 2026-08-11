@@ -112,3 +112,30 @@ def test_display_lines():
     assert lines[0] == "@@ -1 +1 @@"  # 首行是 hunk 头
     assert any("2 +     return f" in l for l in lines)
     assert any("2 -     return " in l for l in lines)
+
+
+# GitHub REST API 的 files[].patch 字段常不带 diff --git 头, 直接从 @@ 开始
+GITHUB_API_STYLE_PATCH = """@@ -0,0 +1,3 @@
++def foo():
++    pass
++    return 1
+"""
+
+
+def test_parse_github_api_style_patch():
+    """裸 hunk(无 diff --git / --- / +++ 头)也必须解析出内容(回归测试)。"""
+    files = parse_diff(GITHUB_API_STYLE_PATCH)
+    assert len(files) == 1
+    fd = files[0]
+    assert len(fd.hunks) == 1
+    assert fd.added == [(1, "def foo():"), (2, "    pass"), (3, "    return 1")]
+
+
+def test_parse_mixed_style_patch():
+    """完整 diff 中夹带裸 hunk 片段时互不干扰。"""
+    patch = GITHUB_API_STYLE_PATCH + "\n" + SAMPLE_DIFF
+    files = parse_diff(patch)
+    assert len(files) == 2
+    # 裸 hunk 在前, 完整 diff 在后
+    assert files[0].added[0] == (1, "def foo():")
+    assert files[1].path == "src/hello.py"

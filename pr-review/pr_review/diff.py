@@ -144,11 +144,14 @@ def parse_diff(patch: str) -> list[FileDiff]:
             continue
 
         if line.startswith("@@ "):
-            if current is None:
-                continue
             header = _parse_hunk_header(line)
             if header is None:
                 continue
+            if current is None:
+                # 裸 hunk(无 diff --git 头):GitHub REST API 的 patch 字段即此格式,
+                # 自动创建文件上下文,避免 hunk 被丢弃导致审查拿到空 diff
+                current = FileDiff(path="", old_path="", status="modified")
+                files.append(current)
             current_hunk = DiffHunk(old_start=header[0], new_start=header[1])
             current.hunks.append(current_hunk)
             continue

@@ -93,12 +93,18 @@ class ReviewRunner:
             if not patch:
                 skipped += 1
                 continue
+            # 解析 patch(支持完整 diff 与 GitHub API 裸 hunk 两种格式)
+            parsed = parse_diff(patch)
+            if not parsed or not parsed[0].hunks:
+                # 解析不出变更行(格式异常),跳过,避免把"空 diff"喂给 LLM
+                skipped += 1
+                continue
             candidates.append(
                 FileDiff(
                     path=path,
                     old_path=item.get("previous_filename", ""),
                     status=item.get("status", "modified"),
-                    hunks=parse_diff(patch)[0].hunks if parse_diff(patch) else [],
+                    hunks=parsed[0].hunks,
                 )
             )
 

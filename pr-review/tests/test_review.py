@@ -103,6 +103,27 @@ def test_run_skips_ignored_files():
     assert result.batches == 1
 
 
+def test_run_with_github_api_style_patch():
+    """GitHub API 裸 hunk patch(无 diff --git 头)必须正常解析并审查(回归测试)。"""
+    bare_patch = "@@ -10,1 +10,2 @@\n def login():\n-    pwd = request.form['pwd']\n+    pwd = request.form.get('pwd')"
+    files = [{"filename": "src/auth.py", "status": "modified", "patch": bare_patch}]
+    runner, _, llm = _make_runner(files=files)
+    result = runner.run()
+    assert len(result.issues) == 1
+    assert result.issues[0].file == "src/auth.py"
+    assert llm.chat.call_count == 1  # 裸 hunk 也被正常送审
+
+
+def test_run_skips_unparseable_patch():
+    """解析不出变更行的 patch 应跳过, 不把空 diff 喂给 LLM。"""
+    files = [{"filename": "weird.bin", "status": "modified", "patch": "not-a-diff"}]
+    runner, github, llm = _make_runner(files=files)
+    result = runner.run()
+    assert not result.has_issues
+    llm.chat.assert_not_called()
+    github.post_review.assert_not_called()
+
+
 def test_run_empty_candidates_no_review():
     runner, github, _ = _make_runner(files=[])
     result = runner.run()
