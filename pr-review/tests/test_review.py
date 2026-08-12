@@ -164,6 +164,31 @@ def test_format_comment_no_issues():
     result = runner.run()
     comment = runner.format_comment(result)
     assert "未发现达到审查门槛的问题" in comment
+    assert "✅" in comment
+
+
+def test_format_comment_no_issues_fallback_evaluation():
+    """无 issues 且 LLM 未给 summary → 兜底给出正向评价。"""
+    from pr_review.review import ReviewResult
+
+    result = ReviewResult(model="deepseek-chat")
+    runner, _, _ = _make_runner(files=[])
+    comment = runner.format_comment(result)
+    assert "整体质量良好" in comment
+    assert "✅ 未发现达到审查门槛的问题" in comment
+
+
+def test_format_comment_no_issues_shows_llm_praise():
+    """无 issues 且 LLM 给了正向 summary → 评价优先显示。"""
+    from pr_review.review import ReviewResult
+
+    result = ReviewResult(model="deepseek-chat")
+    result.summaries = ["改动结构清晰, 未发现明显问题"]
+    runner, _, _ = _make_runner(files=[])
+    comment = runner.format_comment(result)
+    assert "改动结构清晰" in comment           # LLM 评价显示
+    assert "整体质量良好" not in comment        # 不显示兜底文案
+    assert "✅ 未发现达到审查门槛的问题" in comment
 
 
 def test_format_comment_sections_and_stats():

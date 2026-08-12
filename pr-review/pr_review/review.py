@@ -196,7 +196,9 @@ class ReviewRunner:
         """执行全部批次,汇总到 result(重写轮带 feedback 注入)。"""
         for idx, batch in enumerate(batches, start=1):
             resp = self._review_batch(pr, batch, idx, len(batches), handled=handled, feedback=feedback)
-            result.summaries.append(self._extract_summary(resp.content))
+            summary = self._extract_summary(resp.content)
+            if summary:  # 过滤空 summary,避免评论里出现空 bullet
+                result.summaries.append(summary)
             result.issues.extend(self._extract_issues(resp.content, handled=handled))
             result.total_cost += resp.cost
             result.total_tokens += resp.prompt_tokens + resp.completion_tokens
@@ -482,7 +484,12 @@ class ReviewRunner:
             lines.append("")
 
         if not result.issues:
-            lines.append("未发现达到审查门槛的问题 ✅")
+            # 无问题时: 优先展示 LLM 的正向评价(如有), 固定提示作结尾
+            if not result.summaries:
+                lines.append("**整体判断**:")
+                lines.append("- 未发现达到审查门槛的问题,改动整体质量良好 ✅")
+                lines.append("")
+            lines.append("✅ 未发现达到审查门槛的问题")
             lines.append("")
 
         stats = [

@@ -85,3 +85,10 @@ def test_parse_review_json_with_trailing_text():
 def test_parse_review_json_invalid():
     with pytest.raises(ValueError):
         parse_review_json("no json here")
+
+
+def test_summary_requires_positive_feedback_when_no_issues():
+    """prompt 要求 summary 无论是否有问题都输出(无问题时给正面评价)。"""
+    system = build_messages(PR, [], DEFAULT_CONFIG)[0]["content"]
+    assert "正面评价" in system
+    assert "无论是否发现问题都必须输出" in system
