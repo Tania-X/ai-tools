@@ -345,3 +345,62 @@ def test_format_comment_no_number_when_unknown():
     result = ReviewResult(model="deepseek-chat")  # review_no 默认 0
     runner, _, _ = _make_runner(files=[])
     assert "次评审" not in runner.format_comment(result)
+
+
+# ---------------------------------------------------------------- P1a 决议驱动
+def test_collect_handled_from_threads():
+    """扫描线程提取决议标记 → 已处理清单。"""
+    from pr_review.review import ReviewRunner
+
+    github = MagicMock()
+    github.get_pull_comments.return_value = [
+        {"body": "明白\n\n<!-- pr-review:ignore:src/auth.py:11 -->"},
+        {"body": "已确认\n\n<!-- pr-review:resolve:src/api/client.ts:42 -->"},
+        {"body": "普通评论没有标记"},
+    ]
+    llm = MagicMock()
+    runner = ReviewRunner(github=github, llm=llm, config=ReviewConfig())
+    handled = runner._collect_handled()
+    assert ("src/auth.py", 11) in handled
+    assert ("src/api/client.ts", 42) in handled
+    assert len(handled) == 2
+
+
+def test_collect_handled_disabled_by_config():
+    from pr_review.review import ReviewRunner
+
+    github = MagicMock()
+    runner = ReviewRunner(
+        github=github, llm=MagicMock(), config=ReviewConfig(resolve_enabled=False)
+    )
+    assert runner._collect_handled() == []
+    github.get_pull_comments.assert_not_called()
+
+
+def test_extract_issues_filters_handled():
+    """已处理清单命中 → 确定性过滤(即使 LLM 重复报了)。"""
+    content = (
+        '{"summary": "s", "issues": ['
+        '{"file": "src/auth.py", "line": 11, "severity": "warn", "title": "重复问题", "detail": "d", "suggestion": "s"},'
+        '{"file": "src/other.py", "line": 3, "severity": "warn", "title": "新问题", "detail": "d", "suggestion": "s"}'
+        "]}"
+    )
+    runner, _, _ = _make_runner(files=[])
+    issues = runner._extract_issues(content, handled=[("src/auth.py", 11)])
+    assert len(issues) == 1
+    assert issues[0].file == "src/other.py"
+
+
+def test_handled_injected_into_prompt():
+    """已处理清单注入 user prompt 的独立段落。"""
+    from pr_review.diff import parse_diff
+    from pr_review.prompt import build_messages
+
+    fd = parse_diff(FILE_ITEM["patch"])[0]
+    msgs = build_messages(PR, [fd], ReviewConfig(), handled=[("src/auth.py", 11)])
+    user = msgs[1]["content"]
+    assert "已处理清单" in user
+    assert "src/auth.py:11" in user
+    assert "不要重复报" in user
+    # 不传 handled 时无该段落
+    assert "已处理清单" not in build_messages(PR, [fd], ReviewConfig())[1]["content"]

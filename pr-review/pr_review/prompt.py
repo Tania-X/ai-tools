@@ -100,11 +100,14 @@ def build_messages(
     batch_no: int | None = None,
     batch_total: int | None = None,
     repo_context: str = "",
+    handled: list[tuple[str, int]] | None = None,
 ) -> list[dict[str, str]]:
     """组装一轮审查的 messages([system, user])。
 
     repo_context: 仓库约定/契约文档摘要(AGENTS.md/spec 等),注入在 diff 之前,
     帮助 AI 结合项目约定与后端契约判断(第一轮评估中 2/3 误报的根因就是缺此上下文)。
+    handled: 已处理清单 [(file, line), ...] — 用户在线程已确认解决/忽略的问题,
+    要求 AI 不要重复报(P1a 决议驱动)。
     """
     focus_text = "\n".join(f"- {f}" for f in config.review_focus)
     batch_note = (
@@ -124,6 +127,15 @@ def build_messages(
     ]
     if repo_context:
         parts += ["## 仓库上下文(约定/契约,判断依据,请先阅读)", "", repo_context.strip(), ""]
+    if handled:
+        parts += [
+            "## 已处理清单(以下问题已在线程对话中确认解决或属设计意图)",
+            "对这些位置不要重复报问题,除非出现了新的、不同的缺陷。",
+            "",
+        ]
+        for path, line in handled:
+            parts.append(f"- {path}:{line}")
+        parts.append("")
     parts += [
         "## 变更内容(diff)",
         "",

@@ -8,16 +8,18 @@ from pr_review.github import GitHubClient
 from pr_review.reply import ReplyHandler
 from pr_review.prompt import build_reply_messages
 
-# 评论结构: id / body / user.login / user.type / in_reply_to_id
+# 评论结构: id / body / user.login / user.type / in_reply_to_id / path / line
 AI_COMMENT = {
     "id": 100,
     "body": "## 🤖 AI 代码审查\n\n🟡 **建议使用 get 获取参数**",
     "user": {"login": "github-actions[bot]", "type": "Bot"},
     "in_reply_to_id": None,
+    "path": "src/auth.py",
+    "line": 10,
 }
 USER_REPLY = {
     "id": 101,
-    "body": "这是有意设计, 忽略",
+    "body": "为什么这么判断?",
     "user": {"login": "dev", "type": "User"},
     "in_reply_to_id": 100,
 }
@@ -67,10 +69,49 @@ def test_non_ai_thread_skipped():
 def test_user_reply_gets_ai_answer():
     handler, github, llm = _handler()
     assert handler.handle(USER_REPLY) is True
-    # 回复发布到用户评论所在线程
+    # 纯提问(ask):无决议标记,回复原样发布
     github.post_pull_comment.assert_called_once_with(
         "明白, 已确认是设计意图。", in_reply_to=101
     )
+
+
+# ---------------------------------------------------------------- P1a 决议驱动
+def test_resolve_intent_keywords():
+    assert ReplyHandler._resolve_intent("这是设计意图, 忽略") == "ignore"
+    assert ReplyHandler._resolve_intent("by design, 不用改") == "ignore"
+    assert ReplyHandler._resolve_intent("已按建议修复了") == "resolve"
+    assert ReplyHandler._resolve_intent("fixed, thanks") == "resolve"
+    assert ReplyHandler._resolve_intent("为什么这么判断?") == "ask"
+    assert ReplyHandler._resolve_intent("能举个例子吗") == "ask"
+
+
+def test_reply_appends_mark_on_ignore():
+    """用户表态忽略 → AI 回复附带隐藏决议标记(供下轮 review 识别)。"""
+    reply = {**USER_REPLY, "body": "这是设计意图, 忽略"}
+    handler, github, _ = _handler()
+    assert handler.handle(reply) is True
+    posted_body = github.post_pull_comment.call_args[0][0]
+    assert "<!-- pr-review:ignore:src/auth.py:10 -->" in posted_body
+    assert "明白, 已确认是设计意图。" in posted_body
+
+
+def test_reply_appends_mark_on_resolve():
+    reply = {**USER_REPLY, "body": "已按建议修复了"}
+    handler, github, _ = _handler()
+    handler.handle(reply)
+    posted_body = github.post_pull_comment.call_args[0][0]
+    assert "<!-- pr-review:resolve:src/auth.py:10 -->" in posted_body
+
+
+def test_mark_skipped_when_root_has_no_location():
+    """线程根评论无 path/line(异常情况)→ 不附加标记,回复正常发布。"""
+    no_loc = {**AI_COMMENT, "path": None, "line": None}
+    comments = [no_loc, USER_REPLY]
+    reply = {**USER_REPLY, "body": "已解决"}
+    handler, github, _ = _handler(comments=comments)
+    handler.handle(reply)
+    posted_body = github.post_pull_comment.call_args[0][0]
+    assert "<!-- pr-review:" not in posted_body
 
 
 def test_thread_collection_walks_parent_chain():

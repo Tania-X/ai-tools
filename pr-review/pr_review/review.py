@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from .config import ReviewConfig
 from .diff import DiffHunk, FileDiff, parse_diff
 from .github import GitHubClient, PRInfo
 from .prompt import build_messages, parse_review_json
+from .reply import RESOLUTION_MARK_RE
 
 logger = logging.getLogger("pr_review")
 
@@ -160,22 +162,53 @@ class ReviewRunner:
         batches = self._batch_files(candidates)
         result.batches = len(batches)
 
+        # P1a 决议驱动:扫描线程,提取用户已确认解决/忽略的位置,不再重复报
+        handled = self._collect_handled()
+        if handled:
+            logger.info("已处理清单 %d 条(线程决议),注入 prompt 并过滤", len(handled))
+
         for idx, batch in enumerate(batches, start=1):
-            resp = self._review_batch(pr, batch, idx, len(batches))
+            resp = self._review_batch(pr, batch, idx, len(batches), handled=handled)
             result.summaries.append(self._extract_summary(resp.content))
-            result.issues.extend(self._extract_issues(resp.content))
+            result.issues.extend(self._extract_issues(resp.content, handled=handled))
             result.total_cost += resp.cost
             result.total_tokens += resp.prompt_tokens + resp.completion_tokens
 
         result.issues.sort(key=lambda i: (i.file, i.line))
         return result
 
+    # ------------------------------------------------------------------ 已处理清单(决议驱动)
+    def _collect_handled(self) -> list[tuple[str, int]]:
+        """扫描 PR 线程,提取决议标记(<!-- pr-review:resolve|ignore:path:line -->)。
+
+        仅当 config.resolve_enabled 开启;结果按 max_handled_lines 截断。
+        """
+        if not self.config.resolve_enabled:
+            return []
+        handled: list[tuple[str, int]] = []
+        try:
+            comments = self.github.get_pull_comments()
+        except Exception as e:  # 网络/权限异常不阻塞主流程
+            logger.warning("扫描线程失败(决议驱动降级为不启用): %s", e)
+            return []
+        for c in comments:
+            m = re.search(RESOLUTION_MARK_RE, c.get("body", ""))
+            if m:
+                handled.append((m.group(2), int(m.group(3))))
+        return handled[: self.config.max_handled_lines]
+
     # ------------------------------------------------------------------ 单批审查
     def _review_batch(
-        self, pr: PRInfo, batch: list[FileDiff], batch_no: int, batch_total: int
+        self,
+        pr: PRInfo,
+        batch: list[FileDiff],
+        batch_no: int,
+        batch_total: int,
+        handled: list[tuple[str, int]] | None = None,
     ) -> ChatResponse:
         messages = build_messages(
-            pr, batch, self.config, batch_no, batch_total, repo_context=self.context
+            pr, batch, self.config, batch_no, batch_total,
+            repo_context=self.context, handled=handled,
         )
         last_err: Exception | None = None
         for _ in range(self.max_retry_bad_json + 1):
@@ -194,7 +227,9 @@ class ReviewRunner:
         except ValueError:
             return ""
 
-    def _extract_issues(self, content: str) -> list[ReviewIssue]:
+    def _extract_issues(
+        self, content: str, handled: list[tuple[str, int]] | None = None
+    ) -> list[ReviewIssue]:
         try:
             data = parse_review_json(content)
         except ValueError as e:
@@ -206,6 +241,10 @@ class ReviewRunner:
             if not issue.title or not issue.file:
                 continue  # 缺关键字段的直接丢弃
             if not self.config.passes_filter(issue.severity):
+                continue
+            # 决议驱动兜底:命中已处理清单的位置直接过滤(即使 LLM 没遵守 prompt)
+            if handled and (issue.file, issue.line) in set(handled):
+                logger.info("过滤已处理问题: %s:%s", issue.file, issue.line)
                 continue
             issues.append(issue)
         return issues
