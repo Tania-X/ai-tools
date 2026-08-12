@@ -85,3 +85,4 @@ jobs:
 - [pr-review 使用指南](docs/pr-review.md) — 实现原理、前提条件、手动配置流程、配置项参考
 - [P1 质量门禁方案](docs/pr-review-quality-gate.md) — LLM-as-judge 打分 + 自检重写(规划,未实现)
 - [P2 描述自动补全方案](docs/pr-review-desc-autofill.md) — 创建 PR 后 AI 自动生成 title/description(规划,未实现)
+- [质量闭环路线图(P1/P2 合并)](docs/pr-review-evolution.md) — 线程决议驱动 + 质量门 + desc 补全统一设计(规划,未实现)
