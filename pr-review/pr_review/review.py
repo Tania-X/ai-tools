@@ -214,12 +214,28 @@ class ReviewRunner:
         """judge 打分 → 不达标带 reasons 整批重审(Reflexion 式) → 耗尽降级。
 
         重写轮 issues 不叠加,以最后一轮为准。
+
+        空 issues 短路(线上 bug 修复): 审查正确输出空 issues 时——
+        - diff 无代码变更(纯文档/配置 PR)→ 跳过质量门直接 pass, 不浪费 token
+        - diff 有代码变更 → 只做一次漏报检查(重写上限 1), 防止 judge 误判引发大循环
         """
         from .quality import Judge
 
         judge = Judge(llm=self.llm, config=self.config.quality_gate)
         diff_text = self._diff_text()
-        for attempt in range(self.config.quality_gate.max_rewrites + 1):
+
+        if not result.issues:
+            if not self._has_code_changes():
+                result.quality_verdict = "pass"
+                result.quality_score = float(self.config.quality_gate.pass_score)
+                logger.info("无代码变更且无 issues, 跳过质量门")
+                return result
+            logger.info("有代码变更但无 issues, 仅做一次漏报检查")
+        max_rewrites = (
+            1 if not result.issues else self.config.quality_gate.max_rewrites
+        )
+
+        for attempt in range(max_rewrites + 1):
             jr = judge.evaluate(result, diff_text)
             result.quality_score = jr.score
             result.quality_reasons = jr.reasons
@@ -228,7 +244,7 @@ class ReviewRunner:
                 logger.info("质量门通过: %s 分(第 %d 轮)", jr.score, attempt + 1)
                 break
             result.quality_verdict = "rewrite"
-            if attempt >= self.config.quality_gate.max_rewrites:
+            if attempt >= max_rewrites:
                 result.quality_verdict = "degraded"
                 logger.warning(
                     "质量门降级: 重写 %d 次仍低于阈值(%s 分 < %s)",
@@ -239,7 +255,7 @@ class ReviewRunner:
             result.rewrites += 1
             logger.info(
                 "质量门重写 %d/%d: %s 分, feedback %d 条",
-                result.rewrites, self.config.quality_gate.max_rewrites, jr.score, len(jr.reasons),
+                result.rewrites, max_rewrites, jr.score, len(jr.reasons),
             )
             fresh = ReviewResult(
                 model=result.model,
@@ -258,6 +274,19 @@ class ReviewRunner:
             parts.append(f"### {fd.path} ({fd.status})")
             parts.extend(fd.to_display_lines())
         return "\n".join(parts)
+
+    # 视为"代码变更"的扩展名(质量门空 issues 短路判断用)
+    _CODE_EXTS = {
+        ".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".rs", ".c",
+        ".cpp", ".cc", ".kt", ".rb", ".php", ".sh", ".sql", ".vue", ".cs",
+    }
+
+    def _has_code_changes(self) -> bool:
+        """候选文件里是否存在代码文件(区别于文档/配置/生成内容)。"""
+        for fd in getattr(self, "_last_candidates", []):
+            if Path(fd.path).suffix.lower() in self._CODE_EXTS:
+                return True
+        return False
 
     # ------------------------------------------------------------------ 已处理清单(决议驱动)
     def _collect_handled(self) -> list[tuple[str, int]]:

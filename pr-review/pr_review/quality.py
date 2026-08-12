@@ -23,6 +23,9 @@ JUDGE_SYSTEM_PROMPT = """你是代码审查质量评估员,对 AI 审查产出�
 - 噪音: 是否过度挑剔无关紧要的问题
 
 评分规则:
+- 若 issues 为空数组:
+  - diff 主要是不影响逻辑的文件(文档/配置/生成内容)→ 空 issues 属**正确审查**, 应给 pass(≥ {pass_score})
+  - diff 含实质代码变更, 且明显存在应审出的缺陷 → 才判 rewrite(漏报), 并说明漏掉了什么
 - 总分 ≥ {pass_score} → verdict: "pass"
 - 总分低于 → verdict: "rewrite", 并给出 reasons(逐条说明扣分点, 供重写时作为反馈)
 

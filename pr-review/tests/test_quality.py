@@ -146,8 +146,15 @@ def test_quality_loop_rewrite_then_pass():
 
 
 def test_quality_loop_degraded_after_max_rewrites():
+    # 非空 issues(有代码问题)→ 走完整 3 次重写路径
+    issues_json = (
+        '{"file": "src/a.py", "line": 1, "severity": "warn", "title": "A", "detail": "", "suggestion": ""}'
+    )
     responses = [
-        ChatResponse(content='{"summary": "s", "issues": []}', model="m", provider="p", usage={})
+        ChatResponse(
+            content='{"summary": "s", "issues": [' + issues_json + "]}",
+            model="m", provider="p", usage={},
+        )
         for _ in range(4)  # 原审 + 3 次重写
     ]
     runner, _, llm = _quality_runner(responses)
@@ -213,3 +220,72 @@ def test_feedback_injected_into_prompt():
     user = msgs[1]["content"]
     assert "上一轮质量反馈" in user
     assert "误报" in user
+
+
+# ---------------------------------------------------------------- 空 issues 短路(线上 bug 修复)
+def test_quality_loop_skips_judge_when_no_code_changes():
+    """纯文档/配置 PR(无代码变更)且 issues 空 → 直接 pass, judge 不调用(零浪费)。"""
+    runner, github, llm = _quality_runner(
+        [ChatResponse(content='{"summary": "无问题", "issues": []}', model="m", provider="p", usage={})]
+    )
+    # 覆盖 PR 文件为纯文档(AGENTS.md)
+    github.get_pr_files.return_value = [{
+        "filename": "AGENTS.md", "status": "modified",
+        "patch": "@@ -1,1 +1,2 @@\n+new rule",
+    }]
+    with patch("pr_review.quality.Judge.evaluate") as mocked_judge:
+        result = runner.run()
+    assert result.quality_verdict == "pass"
+    assert result.rewrites == 0
+    mocked_judge.assert_not_called()  # 关键: judge 完全不调用
+    assert llm.chat.call_count == 1   # 只审一次
+
+
+def test_quality_loop_empty_issues_with_code_checks_once():
+    """有代码变更但 issues 空 → 只做一次漏报检查(重写上限 1), 不无限循环。"""
+    from pr_review.quality import JudgeResult
+
+    responses = [
+        ChatResponse(content='{"summary": "s", "issues": []}', model="m", provider="p", usage={}),
+        ChatResponse(content='{"summary": "s", "issues": []}', model="m", provider="p", usage={}),
+    ]
+    runner, _, llm = _quality_runner(responses)
+    from pr_review.diff import parse_diff
+
+    runner._last_candidates = [
+        parse_diff("diff --git a/src/main.go b/src/main.go\n--- a/src/main.go\n+++ b/src/main.go\n@@ -1,1 +1,2 @@\n+func main() {}")[0]
+    ]
+    judge_results = iter(
+        [JudgeResult(score=30, verdict="rewrite", reasons=["漏报"]),
+         JudgeResult(score=30, verdict="rewrite", reasons=["仍漏报"])]
+    )
+    with patch("pr_review.quality.Judge.evaluate", side_effect=lambda r, d: next(judge_results)):
+        result = runner.run()
+    assert result.quality_verdict == "degraded"
+    assert result.rewrites == 1  # 空 issues 时重写上限 1, 不是 3
+    assert llm.chat.call_count == 2
+
+
+def test_has_code_changes_detects_extensions():
+    runner, _, _ = _quality_runner([])
+    from pr_review.diff import parse_diff
+
+    runner._last_candidates = [
+        parse_diff("diff --git a/AGENTS.md b/AGENTS.md\n--- a/AGENTS.md\n+++ b/AGENTS.md\n@@ -1 +1 @@\n+x")[0]
+    ]
+    assert runner._has_code_changes() is False
+    runner._last_candidates = [
+        parse_diff("diff --git a/src/a.go b/src/a.go\n--- a/src/a.go\n+++ b/src/a.go\n@@ -1 +1 @@\n+x")[0]
+    ]
+    assert runner._has_code_changes() is True
+
+
+def test_judge_prompt_has_empty_issues_rule():
+    """judge prompt 明确'文档变更空 issues = 正确审查'规则。"""
+    from pr_review.quality import build_judge_messages
+
+    result = ReviewResult()
+    cfg = QualityConfig(pass_score=70)
+    system = build_judge_messages(result, "diff", [], cfg)[0]["content"]
+    assert "issues 为空数组" in system
+    assert "正确审查" in system
