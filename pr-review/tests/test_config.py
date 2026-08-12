@@ -68,3 +68,31 @@ def test_default_v2_fields():
     assert "README.md" in cfg.context_files
     assert cfg.ignore_generated is True
     assert cfg.max_context_chars > 0
+
+
+def test_load_config_quality_gate(tmp_path):
+    f = tmp_path / ".ai-review.yaml"
+    f.write_text(
+        "quality_gate:\n"
+        "  enabled: false\n"
+        "  judge_model: deepseek-r1\n"
+        "  pass_score: 60\n"
+        "  max_rewrites: 2\n"
+        "  lint_enabled: true\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(f)
+    qg = cfg.quality_gate
+    assert qg.enabled is False
+    assert qg.judge_model == "deepseek-r1"
+    assert qg.pass_score == 60
+    assert qg.max_rewrites == 2
+    assert qg.lint_enabled is True
+
+
+def test_default_quality_gate():
+    cfg = DEFAULT_CONFIG
+    assert cfg.quality_gate.enabled is True
+    assert cfg.quality_gate.pass_score == 70
+    assert cfg.quality_gate.max_rewrites == 3
+    assert cfg.quality_gate.lint_enabled is False  # 首版预留

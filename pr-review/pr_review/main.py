@@ -169,6 +169,26 @@ def main() -> None:
         # 评审次数: 已有 AI review 数 + 1(显示"第 N 次评审")
         result.review_no = github.count_ai_reviews() + 1
 
+        # 质量门降级(P1b):不发低质量审查,发说明评论(附 issues 摘要) + check neutral(不拦合并)
+        if result.quality_verdict == "degraded":
+            pr = github.get_pr_info()
+            github.post_review(body=runner.format_degraded_comment(result), head_sha=pr.head_sha)
+            try:
+                github.create_check_run(
+                    "AI Review",
+                    head_sha=pr.head_sha,
+                    conclusion="neutral",
+                    title=f"[第{result.review_no}次] 审查质量未达标(不阻塞合并)",
+                    summary=(
+                        f"质量评分 {result.quality_score:.0f}/100, "
+                        f"阈值 {review_cfg.quality_gate.pass_score}, 重写 {result.rewrites} 次仍不达标"
+                    ),
+                )
+            except GitHubError as e:
+                logger.warning("创建 check-run 失败: %s", e)
+            logger.warning("质量门降级,跳过正常发布")
+            return
+
         if not result.has_issues and not result.summaries:
             logger.info("没有审查结果,跳过评论")
             return

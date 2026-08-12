@@ -55,6 +55,18 @@ resolve_enabled: true
 # 已处理清单注入上限条数
 max_handled_lines: 200
 
+# 质量门(P1b):审查完成后 judge 打分,不达标带反馈整批重写,仍不达标降级
+#   (发说明评论 + check neutral, 不拦合并)。详设: docs/pr-review-quality-gate.md
+quality_gate:
+  enabled: true          # 一键开关; 关闭则跳过 judge 与重写
+  judge_model: ""        # judge 用模型; 留空=与审查同模型
+  pass_score: 70         # 低于则触发重写
+  max_rewrites: 3        # 重写硬上限, 耗尽后降级
+  max_judge_input_chars: 8000  # judge 输入预算(大 PR 截断)
+  # linter 交叉验证层: 首版预留, 未实现(需工作流安装对应 linter)
+  lint_enabled: false
+  lint_only: [py, go, js]
+
 # 切片:大 PR 按批审,控制单次 prompt token 与成本
 max_files_per_batch: 20
 

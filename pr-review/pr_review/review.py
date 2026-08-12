@@ -76,6 +76,11 @@ class ReviewResult:
     review_no: int = 0
     # 文件 -> 新增行号集合(用于行内评论定位校验, GitHub 要求 line 必须是被修改的行)
     added_lines: dict[str, set[int]] = field(default_factory=dict)
+    # 质量门(P1b)结果
+    quality_score: float | None = None
+    quality_verdict: str | None = None  # pass / rewrite / degraded
+    quality_reasons: list[str] = field(default_factory=list)
+    rewrites: int = 0
 
     @property
     def has_issues(self) -> bool:
@@ -161,21 +166,98 @@ class ReviewRunner:
             result.added_lines[fd.path] = {line_no for line_no, _ in fd.added}
         batches = self._batch_files(candidates)
         result.batches = len(batches)
+        self._last_candidates = candidates  # 供质量门 judge 核对 diff
 
         # P1a 决议驱动:扫描线程,提取用户已确认解决/忽略的位置,不再重复报
         handled = self._collect_handled()
         if handled:
             logger.info("已处理清单 %d 条(线程决议),注入 prompt 并过滤", len(handled))
 
+        # 批次审查(P1b 重写轮复用)
+        result = self._run_batches(pr, batches, result, handled=handled)
+
+        # P1b 质量门:judge 打分,不达标带反馈整批重审
+        if self.config.quality_gate.enabled:
+            result = self._quality_loop(pr, batches, result, handled=handled)
+
+        result.issues.sort(key=lambda i: (i.file, i.line))
+        return result
+
+    # ------------------------------------------------------------------ 批次执行
+    def _run_batches(
+        self,
+        pr: PRInfo,
+        batches: list[list[FileDiff]],
+        result: ReviewResult,
+        *,
+        handled: list[tuple[str, int]] | None = None,
+        feedback: list[str] | None = None,
+    ) -> ReviewResult:
+        """执行全部批次,汇总到 result(重写轮带 feedback 注入)。"""
         for idx, batch in enumerate(batches, start=1):
-            resp = self._review_batch(pr, batch, idx, len(batches), handled=handled)
+            resp = self._review_batch(pr, batch, idx, len(batches), handled=handled, feedback=feedback)
             result.summaries.append(self._extract_summary(resp.content))
             result.issues.extend(self._extract_issues(resp.content, handled=handled))
             result.total_cost += resp.cost
             result.total_tokens += resp.prompt_tokens + resp.completion_tokens
-
-        result.issues.sort(key=lambda i: (i.file, i.line))
         return result
+
+    # ------------------------------------------------------------------ 质量门循环
+    def _quality_loop(
+        self,
+        pr: PRInfo,
+        batches: list[list[FileDiff]],
+        result: ReviewResult,
+        *,
+        handled: list[tuple[str, int]] | None = None,
+    ) -> ReviewResult:
+        """judge 打分 → 不达标带 reasons 整批重审(Reflexion 式) → 耗尽降级。
+
+        重写轮 issues 不叠加,以最后一轮为准。
+        """
+        from .quality import Judge
+
+        judge = Judge(llm=self.llm, config=self.config.quality_gate)
+        diff_text = self._diff_text()
+        for attempt in range(self.config.quality_gate.max_rewrites + 1):
+            jr = judge.evaluate(result, diff_text)
+            result.quality_score = jr.score
+            result.quality_reasons = jr.reasons
+            if jr.verdict == "pass":
+                result.quality_verdict = "pass"
+                logger.info("质量门通过: %s 分(第 %d 轮)", jr.score, attempt + 1)
+                break
+            result.quality_verdict = "rewrite"
+            if attempt >= self.config.quality_gate.max_rewrites:
+                result.quality_verdict = "degraded"
+                logger.warning(
+                    "质量门降级: 重写 %d 次仍低于阈值(%s 分 < %s)",
+                    result.rewrites, jr.score, self.config.quality_gate.pass_score,
+                )
+                break
+            # 带 judge reasons 整批重审; 新结果替换旧 issues(不叠加)
+            result.rewrites += 1
+            logger.info(
+                "质量门重写 %d/%d: %s 分, feedback %d 条",
+                result.rewrites, self.config.quality_gate.max_rewrites, jr.score, len(jr.reasons),
+            )
+            fresh = ReviewResult(
+                model=result.model,
+                skipped_files=result.skipped_files,
+                added_lines=result.added_lines,
+                batches=result.batches,
+                rewrites=result.rewrites,  # 保留重写计数
+            )
+            result = self._run_batches(pr, batches, fresh, handled=handled, feedback=jr.reasons)
+        return result
+
+    def _diff_text(self) -> str:
+        """全部候选文件的紧凑 diff 文本(judge 核对准确性用)。"""
+        parts: list[str] = []
+        for fd in getattr(self, "_last_candidates", []):
+            parts.append(f"### {fd.path} ({fd.status})")
+            parts.extend(fd.to_display_lines())
+        return "\n".join(parts)
 
     # ------------------------------------------------------------------ 已处理清单(决议驱动)
     def _collect_handled(self) -> list[tuple[str, int]]:
@@ -205,10 +287,11 @@ class ReviewRunner:
         batch_no: int,
         batch_total: int,
         handled: list[tuple[str, int]] | None = None,
+        feedback: list[str] | None = None,
     ) -> ChatResponse:
         messages = build_messages(
             pr, batch, self.config, batch_no, batch_total,
-            repo_context=self.context, handled=handled,
+            repo_context=self.context, handled=handled, feedback=feedback,
         )
         last_err: Exception | None = None
         for _ in range(self.max_retry_bad_json + 1):
@@ -382,6 +465,42 @@ class ReviewRunner:
             stats.append(f"成本: ¥{result.total_cost:.4f}")
         if result.skipped_files:
             stats.append(f"跳过文件: {result.skipped_files}")
+        if self.config.show_stats:
+            lines.append("---")
+            lines.append("_自动生成 · " + " · ".join(stats) + "_")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ 质量门降级评论
+    def format_degraded_comment(self, result: ReviewResult) -> str:
+        """质量门降级:不发低质量审查,发说明评论(附最后一次 issues 摘要供参考)。"""
+        header = "## 🤖 AI 代码审查"
+        if result.review_no:
+            header += f" · 第 {result.review_no} 次评审"
+        lines = [
+            header,
+            "",
+            "⚠️ **本轮 AI 审查质量评估未达标**(多次重写后仍低于阈值)。",
+        ]
+        if result.quality_score is not None:
+            lines.append(
+                f"最后一次评分: **{result.quality_score:.0f}/100**(阈值 {self.config.quality_gate.pass_score})"
+            )
+        lines.append("")
+        if result.quality_reasons:
+            lines.append("**judge 反馈**:")
+            lines.extend(f"- {r}" for r in result.quality_reasons)
+            lines.append("")
+        lines.append("建议: 稍后手动 rerun 本 workflow, 或进行人工 review。")
+        if result.issues:
+            lines.append("")
+            lines.append("最后一次审出的问题(供参考,未通过质量门):")
+            for issue in result.issues:
+                loc = f"`{issue.file}`:{issue.line}" if issue.line else f"`{issue.file}`"
+                lines.append(f"- {loc} — {issue.title}")
+        lines.append("")
+        stats = [f"批次数: {result.batches}", f"token: {result.total_tokens}"]
+        if result.total_cost:
+            stats.append(f"成本: ¥{result.total_cost:.4f}")
         if self.config.show_stats:
             lines.append("---")
             lines.append("_自动生成 · " + " · ".join(stats) + "_")

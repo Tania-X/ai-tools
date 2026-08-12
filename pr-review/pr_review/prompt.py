@@ -101,6 +101,7 @@ def build_messages(
     batch_total: int | None = None,
     repo_context: str = "",
     handled: list[tuple[str, int]] | None = None,
+    feedback: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """组装一轮审查的 messages([system, user])。
 
@@ -108,6 +109,7 @@ def build_messages(
     帮助 AI 结合项目约定与后端契约判断(第一轮评估中 2/3 误报的根因就是缺此上下文)。
     handled: 已处理清单 [(file, line), ...] — 用户在线程已确认解决/忽略的问题,
     要求 AI 不要重复报(P1a 决议驱动)。
+    feedback: judge 的质量反馈(重写轮),要求 AI 修正(P1b 质量门)。
     """
     focus_text = "\n".join(f"- {f}" for f in config.review_focus)
     batch_note = (
@@ -135,6 +137,10 @@ def build_messages(
         ]
         for path, line in handled:
             parts.append(f"- {path}:{line}")
+        parts.append("")
+    if feedback:
+        parts += ["## 上一轮质量反馈(必须修正的问题)", ""]
+        parts.extend(f"- {r}" for r in feedback)
         parts.append("")
     parts += [
         "## 变更内容(diff)",

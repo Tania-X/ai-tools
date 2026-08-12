@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 from gateway import ChatResponse
 
-from pr_review.config import ReviewConfig
+from pr_review.config import QualityConfig, ReviewConfig
 from pr_review.github import PRInfo
 from pr_review.review import ReviewIssue, ReviewRunner
 
@@ -58,7 +58,12 @@ def _make_runner(*, files=None, llm_responses=None, config=None):
         )
         for r in (llm_responses or [LLM_OK_JSON])
     ]
-    runner = ReviewRunner(github=github, llm=llm, config=config or ReviewConfig())
+    # 既有测试默认关闭质量门(质量门行为由 test_quality.py 专门覆盖)
+    from pr_review.config import QualityConfig
+
+    if config is None:
+        config = ReviewConfig(quality_gate=QualityConfig(enabled=False))
+    runner = ReviewRunner(github=github, llm=llm, config=config)
     return runner, github, llm
 
 
@@ -132,7 +137,7 @@ def test_run_empty_candidates_no_review():
 
 
 def test_run_filters_below_min_severity():
-    cfg = ReviewConfig(min_severity="error")
+    cfg = ReviewConfig(min_severity="error", quality_gate=QualityConfig(enabled=False))
     responses = [
         '{"summary": "s", "issues": ['
         '{"file": "a.py", "line": 1, "severity": "warn", "title": "小问题", "detail": "d", "suggestion": "s"},'
@@ -145,7 +150,7 @@ def test_run_filters_below_min_severity():
 
 
 def test_run_batches_files():
-    cfg = ReviewConfig(max_files_per_batch=2)
+    cfg = ReviewConfig(max_files_per_batch=2, quality_gate=QualityConfig(enabled=False))
     files = [{**FILE_ITEM, "filename": f"f{i}.py"} for i in range(5)]
     llm_responses = [LLM_OK_JSON] * 3  # 5 个文件分 3 批
     runner, _, llm = _make_runner(files=files, llm_responses=llm_responses, config=cfg)
@@ -162,7 +167,7 @@ def test_format_comment_no_issues():
 
 
 def test_format_comment_sections_and_stats():
-    cfg = ReviewConfig(show_stats=True)
+    cfg = ReviewConfig(show_stats=True, quality_gate=QualityConfig(enabled=False))
     runner, _, _ = _make_runner(config=cfg)
     result = runner.run()
     comment = runner.format_comment(result)

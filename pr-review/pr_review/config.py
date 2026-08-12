@@ -19,6 +19,28 @@ SEVERITIES = ("error", "warn", "info")
 
 
 @dataclass
+class QualityConfig:
+    """质量门配置(LLM-as-judge 自检循环, P1b)。
+
+    详设: docs/pr-review-quality-gate.md
+    """
+
+    # 一键开关:关闭则完全跳过 judge 打分与重写
+    enabled: bool = True
+    # judge 用模型(空=与审查同模型; 独立配置时传 model 覆盖)
+    judge_model: str = ""
+    # 低于该分触发重写; 太高重试爆炸, 太低失去门禁意义
+    pass_score: int = 70
+    # 重写硬上限, 防死循环; 耗尽后降级(说明评论 + check neutral)
+    max_rewrites: int = 3
+    # judge 输入预算(大 PR 截断用)
+    max_judge_input_chars: int = 8000
+    # linter 交叉验证层(首版仅预留, 未实现; 开启需工作流安装对应 linter)
+    lint_enabled: bool = False
+    lint_only: list[str] = field(default_factory=lambda: ["py", "go", "js"])
+
+
+@dataclass
 class ReviewConfig:
     # 审查重点(直接作为指令进入 prompt)
     review_focus: list[str] = field(
@@ -77,6 +99,8 @@ class ReviewConfig:
     resolve_enabled: bool = True
     # 已处理清单注入 prompt 的上限条数(超限截断,防 prompt 膨胀)
     max_handled_lines: int = 200
+    # 质量门(P1b):judge 打分 + 自检重写
+    quality_gate: QualityConfig = field(default_factory=QualityConfig)
 
     def severity_rank(self, severity: str) -> int:
         s = (severity or "info").strip().lower()
@@ -140,4 +164,20 @@ def load_config(path: str | Path | None = None) -> ReviewConfig:
     if "resolve_enabled" in data:
         cfg.resolve_enabled = bool(data["resolve_enabled"])
     cfg.max_handled_lines = int(data.get("max_handled_lines", cfg.max_handled_lines))
+    # quality_gate 块(缺失则用默认; lint 层首版仅预留)
+    qg = data.get("quality_gate") or {}
+    if isinstance(qg, dict):
+        if "enabled" in qg:
+            cfg.quality_gate.enabled = bool(qg["enabled"])
+        if qg.get("judge_model"):
+            cfg.quality_gate.judge_model = str(qg["judge_model"])
+        cfg.quality_gate.pass_score = int(qg.get("pass_score", cfg.quality_gate.pass_score))
+        cfg.quality_gate.max_rewrites = int(qg.get("max_rewrites", cfg.quality_gate.max_rewrites))
+        cfg.quality_gate.max_judge_input_chars = int(
+            qg.get("max_judge_input_chars", cfg.quality_gate.max_judge_input_chars)
+        )
+        if "lint_enabled" in qg:
+            cfg.quality_gate.lint_enabled = bool(qg["lint_enabled"])
+        if qg.get("lint_only"):
+            cfg.quality_gate.lint_only = list(qg["lint_only"])
     return cfg
