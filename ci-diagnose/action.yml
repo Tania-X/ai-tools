@@ -1,0 +1,47 @@
+name: "CI Diagnose"
+description: "CI 失败自动诊断 —— 分析失败日志, 评论到 PR(根因+定位+修复建议)"
+
+inputs:
+  api-key:
+    description: "LLM API key(DeepSeek / Kimi / OpenAI 兼容端点)"
+    required: true
+  base-url:
+    description: "OpenAI 兼容端点,默认按 provider 内置(deepseek/kimi/openai)"
+    required: false
+    default: ""
+  model:
+    description: "模型名,默认 deepseek-chat(用 kimi/openai 时需显式传)"
+    required: false
+    default: "deepseek-chat"
+  provider:
+    description: "provider 名(deepseek / kimi / openai),默认 deepseek"
+    required: false
+    default: "deepseek"
+  max-log-chars:
+    description: "注入 LLM 的日志预算(字符),超限截断(保留错误行+尾部)"
+    required: false
+    default: "8000"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        pip install -q "httpx>=0.27" "PyYAML>=6.0"
+
+    - name: Diagnose CI failure
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        AI_GATEWAY_PROVIDER: ${{ inputs.provider }}
+        AI_GATEWAY_API_KEYS: ${{ inputs.api-key }}
+        AI_GATEWAY_BASE_URL: ${{ inputs.base-url }}
+        AI_GATEWAY_MODEL: ${{ inputs.model }}
+        CI_DIAGNOSE_MAX_LOG_CHARS: ${{ inputs.max-log-chars }}
+      run: python "${{ github.action_path }}/main.py"
