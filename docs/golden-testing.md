@@ -170,3 +170,40 @@ python run_golden_tests.py [--level 0|1] [--cases case-bug,case-security] [--dry
 
 1. 代码不剧透(不写自我暴露缺陷的注释); 2. 答案分离(集中在 golden-contract.md);
 3. 答案不可见(context_files 只收 AGENTS.md); 4. 自然提交(缺陷藏起来让 AI 自己找)。
+
+---
+
+## 十一、首轮评测记录(2026-08-13)
+
+### Level 0 结果: 6/6 通过(5/6 首轮 → prompt 修复后 6/6)
+
+| case | 结果 | AI 实际表现 |
+|------|------|------------|
+| case-bug | ✅ | 2 issues, check=failure — nil 解引用 error 命中 |
+| case-security | ✅ | 2 issues, check=failure — SQL 注入 + 硬编码密码 |
+| case-convention | ✅ | 1 issue, check=success — 吞 error 被报出 |
+| case-clean | ✅ | 0 issues(首轮误报 2 warn, 见下) |
+| case-docs | ✅ | 0 issues, 质量门 pass |
+| case-bait | ✅ | 0 issues(不报 error, 更克制) |
+
+### 过程踩坑(驱动器 bug, 已修)
+
+1. **查错评论通道**: pr-review 整体评论走 `POST /pulls/{n}/reviews`, 驱动器原查 issue comments
+   → 永远解析 0 issues(正样本全判 fail, 尽管 check-run 是 failure)。修: 新增 `list_pull_reviews` + 回退。
+2. **results/ 未 gitignore**: 场景分支 `git add -A` 会把上个 case 的结果文件误提交进分支, 污染 diff,
+   且 checkout 切回 main 时被 git 清理导致保存失败。修: 测试仓库 .gitignore 加 `results/` + 驱动器保存前 mkdir。
+3. **远程残留分支冲突**: 手工测试遗留的 test/* 分支导致 push 被拒(non-fast-forward), 驱动器 finally 清理兜底。
+
+### prompt 改进(针对 case-clean 误报)
+
+首轮 case-clean 误报 2 条凑数 warn(range 对 nil 安全却建议处理、自相矛盾的注释建议),
+在 SYSTEM_PROMPT 增加规则 13-15 后清零:
+- 13: severity 分级克制(宁低勿高, error 需直接导致 bug/漏洞且有证据)
+- 14: 语言语义已保证安全的模式不报(range 对 nil 安全等), 报前自问能否被一句话反驳
+- 15: 一语中的(title ≤30 字, detail 只说关键, 杜绝发散)
+
+### 当前基线
+
+- 正样本缺陷全命中(bug/security/convention), 负/边界零误报
+- 全量 6 场景单轮 ≈ 4-5 分钟(含质量门 judge)
+- 驱动器: `ai-tools/golden-tests/run_golden_tests.py --level 0|1`; 结果存 `results/<case>.json` + `report-level0.md`
