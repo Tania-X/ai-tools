@@ -55,6 +55,14 @@ class GitHubAPI:
     def list_issue_comments(self, pr_number: int) -> list[dict]:
         return list(self._get(f"/repos/{self.repo}/issues/{pr_number}/comments", params={"per_page": 100}))
 
+    def list_pull_reviews(self, pr_number: int) -> list[dict]:
+        """PR review 列表(整体评论通道)。
+
+        pr-review 的整体评论通过 POST /pulls/{n}/reviews 发布(review body),
+        不是 issue comments——驱动器必须查此通道才能拿到 AI 审查结果。
+        """
+        return list(self._get(f"/repos/{self.repo}/pulls/{pr_number}/reviews", params={"per_page": 100}))
+
     # ------------------------------------------------------------------ 内部
     def _get(self, path: str, params: dict | None = None) -> Any:
         resp = self._client.get(path, params=params)

@@ -77,7 +77,10 @@ class GoldenRunner:
             if conclusion is None:
                 return {"case": name, "status": "skip", "reason": f"轮询超时({POLL_TIMEOUT}s)"}
 
-            body = find_ai_review_comment(self.api.list_issue_comments(pr_number))
+            body = find_ai_review_comment(self.api.list_pull_reviews(pr_number))
+            if not body:
+                # 兼容旧版本: 整体评论曾走 issue comments 通道
+                body = find_ai_review_comment(self.api.list_issue_comments(pr_number))
             actual = parse_comment_issues(body)
             result = evaluate(name, expected, actual, conclusion)
             result["expected"] = expected.get("expect", {})
