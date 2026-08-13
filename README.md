@@ -87,3 +87,4 @@ jobs:
 - [P2 描述自动补全方案](docs/pr-review-desc-autofill.md) — 创建 PR 后 AI 自动生成 title/description(规划,未实现)
 - [质量闭环路线图(P1/P2 合并)](docs/pr-review-evolution.md) — 线程决议驱动 + 质量门 + desc 补全统一设计(规划,未实现)
 - [ci-diagnose 使用指南](docs/ci-diagnose.md) — CI 失败自动诊断: 分析日志评论到 PR(根因+定位+修复建议)
+- [Golden 测试方案](docs/golden-testing.md) — 已知答案场景量化验证审查质量(精确率/召回率)
