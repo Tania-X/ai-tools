@@ -101,6 +101,9 @@ class ReviewConfig:
     max_handled_lines: int = 200
     # 质量门(P1b):judge 打分 + 自检重写
     quality_gate: QualityConfig = field(default_factory=QualityConfig)
+    # 审查调用的 LLM 温度: 审查是判断型任务, 低温度提升稳定性(避免同一 diff 时报时不报);
+    # 回复模式(P0)仍用 gateway 默认温度(对话需要一点随机性)
+    review_temperature: float = 0.3
 
     def severity_rank(self, severity: str) -> int:
         s = (severity or "info").strip().lower()
@@ -164,6 +167,8 @@ def load_config(path: str | Path | None = None) -> ReviewConfig:
     if "resolve_enabled" in data:
         cfg.resolve_enabled = bool(data["resolve_enabled"])
     cfg.max_handled_lines = int(data.get("max_handled_lines", cfg.max_handled_lines))
+    if "review_temperature" in data:
+        cfg.review_temperature = float(data["review_temperature"])
     # quality_gate 块(缺失则用默认; lint 层首版仅预留)
     qg = data.get("quality_gate") or {}
     if isinstance(qg, dict):

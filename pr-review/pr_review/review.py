@@ -332,7 +332,7 @@ class ReviewRunner:
         last_err: Exception | None = None
         for _ in range(self.max_retry_bad_json + 1):
             try:
-                return self.llm.chat(messages)
+                return self.llm.chat(messages, temperature=self.config.review_temperature)
             except ValueError as e:  # JSON 解析失败:重试一次
                 last_err = e
                 logger.warning("LLM 输出非 JSON,重试: %s", e)
