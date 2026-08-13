@@ -15,4 +15,4 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["gateway/tests", "pr-review/tests", "ci-diagnose/tests"]
+testpaths = ["gateway/tests", "pr-review/tests", "ci-diagnose/tests", "golden-tests/tests"]
