@@ -207,3 +207,26 @@ python run_golden_tests.py [--level 0|1] [--cases case-bug,case-security] [--dry
 - 正样本缺陷全命中(bug/security/convention), 负/边界零误报
 - 全量 6 场景单轮 ≈ 4-5 分钟(含质量门 judge)
 - 驱动器: `ai-tools/golden-tests/run_golden_tests.py --level 0|1`; 结果存 `results/<case>.json` + `report-level0.md`
+
+### Level 1 结果: 6/6 通过, 修复闭环 3/3 完整走通
+
+| case | review#1(拒绝) | 修复后 review#2(放行) |
+|------|----------------|----------------------|
+| case-bug | failure, 3 issues | agree(success) |
+| case-security | failure, 2 issues | agree(neutral) |
+| case-convention | failure, 2 issues | agree(success) |
+| clean / docs / bait | 0 issues, success | — |
+
+**refuse → fix → agree 闭环自洽验证通过**: 有缺陷时拦下, 按 fixed 快照修复后放行。
+
+### case-convention 漏报排查记录(重要教训)
+
+首轮 Level 1 中 case-convention 连续漏报(吞 error 判为"结构清晰"), 逐层排查:
+1. 评论通道 / 上下文注入 / 规则 14 例外 / 审查温度 0.3 —— 均非根因
+2. **根因: 人造场景失真** — `loadConfig()` 恒 `return nil`, 吞掉"永远不会失败的 error"
+   无实际风险, AI 判"无害"是**合理判断**而非 bug
+3. 修复: 场景改为 `os.ReadFile` 真实读取(可能失败), 吞 error = 配置加载失败被静默忽略,
+   约定违反真实可检出 → 重跑通过
+
+**结论**: 人造场景的"玩具代码"会导致失真(缺陷设计得不够真实, AI 的合理判断与契约期望冲突)。
+这正是后续引入"真实 PR 回放集"评测的核心动机(见真实评测环境方案)。
