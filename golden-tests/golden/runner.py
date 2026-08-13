@@ -132,6 +132,8 @@ class GoldenRunner:
         return (self.results_dir / f"{name}.json").is_file()
 
     def _save_result(self, name: str, result: dict) -> None:
+        # 结果目录可能被场景分支的 checkout 清理(未忽略时), 保存前确保存在
+        self.results_dir.mkdir(parents=True, exist_ok=True)
         (self.results_dir / f"{name}.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
         )
