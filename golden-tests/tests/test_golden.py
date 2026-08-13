@@ -60,12 +60,32 @@ def test_evaluate_fail_on_too_few_issues():
 
 
 def test_evaluate_fail_on_wrong_severity():
-    # 期望只允许 error, 却报出 warn
+    # 期望至少命中 error, 却只报出 warn(漏报 error)
     expected = {"expect": {"severities": ["error"]}}
     actual = {"error": 0, "warn": 1, "info": 0, "total": 1}
-    result = evaluate("case-bait", expected, actual, "success")
+    result = evaluate("case-bug", expected, actual, "success")
     assert result["pass"] is False
-    assert any("warn" in f for f in result["failures"])
+    assert any("未命中" in f for f in result["failures"])
+
+
+def test_evaluate_pass_when_error_hit_with_noise_warn():
+    # 核心缺陷命中(error) + 额外 warn 噪音, 不应误判 fail(本次修复的核心场景)
+    expected = {"expect": {"min_issues": 1, "severities": ["error"], "quality_pass": True}}
+    actual = {"error": 1, "warn": 3, "info": 0, "total": 4}
+    result = evaluate("case-bug", expected, actual, "failure")
+    assert result["pass"] is True
+    assert result["failures"] == []
+
+
+def test_evaluate_forbid_severity():
+    # 边界样本: 禁止报 error, 报出 error 即 fail
+    expected = {"expect": {"forbid_severities": ["error"], "quality_pass": True}}
+    actual_error = {"error": 1, "warn": 0, "info": 0, "total": 1}
+    assert evaluate("case-bait", expected, actual_error, "failure")["pass"] is False
+
+    # 报 warn/info 可接受
+    actual_warn = {"error": 0, "warn": 1, "info": 0, "total": 1}
+    assert evaluate("case-bait", expected, actual_warn, "success")["pass"] is True
 
 
 def test_evaluate_fail_on_quality_gate_degraded():

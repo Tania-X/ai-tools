@@ -28,12 +28,22 @@ def evaluate(
     if max_issues is not None and total > int(max_issues):
         failures.append(f"issues 数 {total} > max_issues {max_issues}")
 
-    # severity 白名单: 报出的级别都必须在允许集合内
-    allowed_sev = expect.get("severities", []) or []
-    if allowed_sev:
-        for sev in ("error", "warn", "info"):
-            if int(actual.get(sev, 0)) > 0 and sev not in allowed_sev:
-                failures.append(f"报出 {sev} 级问题, 期望仅允许 {allowed_sev}")
+    # 必须命中的级别(至少报出期望集合中的某个级别)——正样本语义:
+    # 例 case-bug 期望 ["error"], 报出 error + 若干 warn 仍 pass(噪音不误杀)
+    required_sev = expect.get("severities") or []
+    if required_sev:
+        reported = {sev for sev in ("error", "warn", "info") if int(actual.get(sev, 0)) > 0}
+        if not (reported & set(required_sev)):
+            failures.append(
+                f"未命中期望级别 {required_sev}(实际报出 {sorted(reported) or '无'})"
+            )
+
+    # 禁止报出的级别——边界样本语义:
+    # 例 case-bait 禁止 ["error"], 报 warn/info 可接受, 报 error = 严重度误判
+    forbid_sev = expect.get("forbid_severities") or []
+    for sev in forbid_sev:
+        if int(actual.get(sev, 0)) > 0:
+            failures.append(f"报出被禁止的 {sev} 级问题(严重度误判)")
 
     # 质量门降级检测: 期望 pass 却 check neutral(质量门降级)
     if expect.get("quality_pass") and check_conclusion == "neutral":
