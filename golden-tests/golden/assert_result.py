@@ -45,6 +45,17 @@ def evaluate(
         if int(actual.get(sev, 0)) > 0:
             failures.append(f"报出被禁止的 {sev} 级问题(严重度误判)")
 
+    # 必须命中的类别(至少报出期望集合中的某个类别)——正样本语义:
+    # 例 case-security 期望 ["security"], 报出的 issue 类别中至少一个为 security
+    # categories 为 None 表示无法解析类别(旧评论无锚点), 跳过校验
+    required_cat = expect.get("categories") or []
+    if required_cat and actual.get("categories") is not None:
+        actual_cats = set(actual.get("categories") or [])
+        if not (actual_cats & set(required_cat)):
+            failures.append(
+                f"未命中期望类别 {required_cat}(实际 {sorted(actual_cats) or '无'})"
+            )
+
     # 质量门降级检测: 期望 pass 却 check neutral(质量门降级)
     if expect.get("quality_pass") and check_conclusion == "neutral":
         failures.append("质量门降级(check neutral), 但期望 pass")

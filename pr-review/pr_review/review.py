@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -42,7 +43,7 @@ class ReviewIssue:
     title: str
     detail: str
     suggestion: str
-    category: str = "other"  # type_consistency / security / design_intent / resource / convention / other
+    category: str = "other"  # bug / security / convention / design_intent / resource / type_consistency / other
     evidence: str = ""       # 判断依据(引用代码/契约位置)
     needs_review: bool = False  # 需人工确认(设计意图类不确定判断,不计入门禁)
 
@@ -508,6 +509,24 @@ class ReviewRunner:
         if self.config.show_stats:
             lines.append("---")
             lines.append("_自动生成 · " + " · ".join(stats) + "_")
+
+        # 机器可读锚点(HTML 注释, 人类不可见): 供 golden 驱动器可靠解析,
+        # 解耦 parser 与正文 Markdown 格式(改正文格式不影响解析)。
+        meta = {
+            "version": 1,
+            "issues": [
+                {
+                    "file": i.file,
+                    "line": i.line,
+                    "severity": i.severity,
+                    "category": i.category,
+                    "title": i.title,
+                }
+                for i in result.issues
+            ],
+        }
+        lines += ["", "<!--AI-REVIEW-META", json.dumps(meta, ensure_ascii=False), "-->"]
+
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ 质量门降级评论

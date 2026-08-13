@@ -34,6 +34,30 @@ def test_parse_comment_issues_empty():
     assert parse_comment_issues("")["total"] == 0
 
 
+def test_parse_comment_issues_from_meta_block():
+    # 优先解析机器锚点, 拿到类别
+    body = (
+        "## 🤖 AI 代码审查\n"
+        "### 🔴 Error (1)\n"
+        "1. **`a.go`:21** — nil 解引用\n"
+        "<!--AI-REVIEW-META\n"
+        '{"version":1,"issues":[{"file":"a.go","line":21,"severity":"error","category":"bug","title":"nil 解引用"}]}\n'
+        "-->"
+    )
+    actual = parse_comment_issues(body)
+    assert actual["error"] == 1
+    assert actual["total"] == 1
+    assert actual["categories"] == ["bug"]
+
+
+def test_parse_comment_issues_fallback_no_categories():
+    # 旧评论(无锚点): 正则计数, categories 为 None(未知)
+    body = "## 🤖 AI 代码审查\n### 🔴 Error (2)\n1. **`a.go`:1** — x"
+    actual = parse_comment_issues(body)
+    assert actual["error"] == 2
+    assert actual["categories"] is None
+
+
 def test_find_ai_review_comment():
     comments = [
         {"body": "普通评论"},
@@ -103,6 +127,21 @@ def test_evaluate_max_issues_zero():
     actual = {"error": 1, "warn": 0, "info": 0, "total": 1}
     result = evaluate("case-clean", expected, actual, "failure")
     assert result["pass"] is False
+
+
+def test_evaluate_category_hit():
+    expected = {"expect": {"min_issues": 1, "severities": ["error"], "categories": ["security"]}}
+    actual = {"error": 1, "warn": 0, "info": 0, "total": 1, "categories": ["security"]}
+    assert evaluate("case-security", expected, actual, "failure")["pass"] is True
+
+
+def test_evaluate_category_miss():
+    # 报对级别但类别不符(如把 SQL 注入报成 bug 而非 security)
+    expected = {"expect": {"severities": ["error"], "categories": ["security"]}}
+    actual = {"error": 1, "warn": 0, "info": 0, "total": 1, "categories": ["bug"]}
+    result = evaluate("case-security", expected, actual, "failure")
+    assert result["pass"] is False
+    assert any("类别" in f for f in result["failures"])
 
 
 # ---------------------------------------------------------------- report

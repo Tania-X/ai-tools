@@ -81,7 +81,7 @@ SYSTEM_PROMPT = """你是一位资深代码审查专家,正在审查一个 Pull 
       "file": "src/foo.py",
       "line": 42,
       "severity": "warn",
-      "category": "type_consistency | security | design_intent | resource | convention | other",
+      "category": "bug | security | convention | design_intent | resource | type_consistency | other",
       "title": "简短的问题标题",
       "detail": "问题描述,说明为什么是问题",
       "suggestion": "具体的修改建议",
