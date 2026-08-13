@@ -167,6 +167,40 @@ def test_format_comment_no_issues():
     assert "✅" in comment
 
 
+def test_format_comment_numbers_within_each_severity():
+    """每个 severity 组内独立编号(error 组 1,2; warn 组重新 1)。"""
+    from pr_review.review import ReviewIssue, ReviewResult
+
+    result = ReviewResult(model="deepseek-chat")
+    result.issues = [
+        ReviewIssue(file="a.py", line=1, severity="error", title="错误1", detail="", suggestion=""),
+        ReviewIssue(file="b.py", line=2, severity="error", title="错误2", detail="", suggestion=""),
+        ReviewIssue(file="c.py", line=3, severity="warn", title="警告1", detail="", suggestion=""),
+    ]
+    runner, _, _ = _make_runner(files=[])
+    comment = runner.format_comment(result)
+    assert "1. **`a.py`:1** — 错误1" in comment
+    assert "2. **`b.py`:2** — 错误2" in comment
+    assert "1. **`c.py`:3** — 警告1" in comment  # warn 组重新编号
+
+
+def test_issues_sorted_severity_desc():
+    """LLM 返回乱序 severity, run 后按 error > warn > info 排序。"""
+    content = (
+        '{"summary": "s", "issues": ['
+        '{"file": "w.py", "line": 1, "severity": "warn", "title": "w", "detail": "", "suggestion": ""},'
+        '{"file": "e.py", "line": 1, "severity": "error", "title": "e", "detail": "", "suggestion": ""},'
+        '{"file": "i.py", "line": 1, "severity": "info", "title": "i", "detail": "", "suggestion": ""}'
+        "]}"
+    )
+    runner, _, _ = _make_runner(
+        llm_responses=[content],
+        config=ReviewConfig(min_severity="info", quality_gate=QualityConfig(enabled=False)),
+    )
+    result = runner.run()
+    assert [i.severity for i in result.issues] == ["error", "warn", "info"]
+
+
 def test_format_comment_no_issues_fallback_evaluation():
     """无 issues 且 LLM 未给 summary → 兜底给出正向评价。"""
     from pr_review.review import ReviewResult

@@ -180,7 +180,11 @@ class ReviewRunner:
         if self.config.quality_gate.enabled:
             result = self._quality_loop(pr, batches, result, handled=handled)
 
-        result.issues.sort(key=lambda i: (i.file, i.line))
+        # 排序: severity 降序(error > warn > info)优先, 同级别按 file+line
+        priority = {"error": 2, "warn": 1, "info": 0}
+        result.issues.sort(
+            key=lambda i: (-priority.get(i.severity, 0), i.file, i.line)
+        )
         return result
 
     # ------------------------------------------------------------------ 批次执行
@@ -469,18 +473,18 @@ class ReviewRunner:
             if not items:
                 continue
             lines.append(f"### {SEVERITY_ICONS[sev]} {sev.capitalize()} ({len(items)})")
-            for i in items:
+            for idx, i in enumerate(items, start=1):
                 loc = f"`{i.file}`:{i.line}" if i.line else f"`{i.file}`"
                 title = f"{i.title} ⚠️" if i.needs_review else i.title
-                lines.append(f"- **{loc}** — {title}")
+                lines.append(f"{idx}. **{loc}** — {title}")
                 if i.needs_review:
-                    lines.append("  - ⚠️ 需人工确认(设计意图类判断)")
+                    lines.append("   - ⚠️ 需人工确认(设计意图类判断)")
                 if i.detail:
-                    lines.append(f"  - {i.detail}")
+                    lines.append(f"   - {i.detail}")
                 if i.suggestion:
-                    lines.append(f"  - 💡 {i.suggestion}")
+                    lines.append(f"   - 💡 {i.suggestion}")
                 if i.evidence:
-                    lines.append(f"  - 📎 依据: {i.evidence}")
+                    lines.append(f"   - 📎 依据: {i.evidence}")
             lines.append("")
 
         if not result.issues:
