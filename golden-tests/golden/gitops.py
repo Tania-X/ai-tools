@@ -48,10 +48,30 @@ class GitOps:
         self._run("commit", "-m", msg, check=False)  # 允许空提交(无变更时)
 
     def push(self, branch: str) -> None:
-        self._run("push", "-u", "origin", branch)
+        # 网络时好时坏(2026-08-14 回归根因): push 失败重试 3 次再抛
+        last_err: RuntimeError | None = None
+        for attempt in range(4):
+            try:
+                self._run("push", "-u", "origin", branch)
+                return
+            except RuntimeError as e:
+                last_err = e
+                print(f"  push {branch} 失败(第{attempt + 1}/4 次): {str(e)[:120]}, 重试...")
+                import time
+
+                time.sleep(4)
+        raise last_err  # type: ignore[misc]
 
     def delete_remote_branch(self, branch: str) -> None:
-        self._run("push", "origin", "--delete", branch, check=False)
+        # 直接 subprocess 拿 stderr: 失败要可见(否则残留分支会挡下次 push)
+        import subprocess
+
+        proc = subprocess.run(
+            ["git", "-C", str(self.repo_dir), "push", "origin", "--delete", branch],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            print(f"  [warn] 远程分支 {branch} 清理失败(稍后手动删): {proc.stderr.strip()[:120]}")
 
     def checkout_and_cleanup(self, branch: str) -> None:
         self._run("checkout", "main")

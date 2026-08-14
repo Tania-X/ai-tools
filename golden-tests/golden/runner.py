@@ -61,6 +61,7 @@ class GoldenRunner:
         category = entry.get("category", "positive")
         run_level1 = self.level >= 1 and category == "positive"
 
+        pr_number: int | None = None
         try:
             # ---- Level 0: buggy 快照 → PR → review → 断言 ----
             self.git.checkout_main()
