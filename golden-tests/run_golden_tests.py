@@ -41,6 +41,7 @@ def main() -> int:
     parser.add_argument("--token", default="", help="GitHub PAT(默认读 GITHUB_TOKEN 环境变量)")
     parser.add_argument("--resume", action="store_true", help="断点续跑")
     parser.add_argument("--dry-run", action="store_true", help="只打印步骤, 不实际执行")
+    parser.add_argument("--playback", action="store_true", help="跑真实 PR 回放集(playback/ 目录)")
     args = parser.parse_args()
 
     token = args.token or os.environ.get("GITHUB_TOKEN", "")
@@ -49,7 +50,7 @@ def main() -> int:
         return 2
 
     repo_dir = Path(args.repo_dir).resolve()
-    scenarios_dir = repo_dir / "scenarios"
+    scenarios_dir = repo_dir / ("playback" if args.playback else "scenarios")
     if not scenarios_dir.is_dir():
         print(f"错误: 找不到场景目录 {scenarios_dir}")
         return 2
@@ -59,9 +60,13 @@ def main() -> int:
 
     # dry-run: 只打印将执行的计划, 不调用网络
     if args.dry_run:
-        manifest = json.loads((scenarios_dir / "manifest.json").read_text(encoding="utf-8"))
+        runner = GoldenRunner(
+            git=None, api=None, scenarios_dir=scenarios_dir, results_dir=results_dir,
+            level=args.level, cases=cases, resume=args.resume,
+        )
+        entries = runner._load_cases()
         print("[dry-run] 将执行以下 case 的测试(Level %d):\n" % args.level)
-        for entry in manifest["cases"]:
+        for entry in entries:
             name = entry["name"]
             if cases and name not in cases:
                 continue

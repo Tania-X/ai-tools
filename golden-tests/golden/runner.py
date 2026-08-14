@@ -36,18 +36,18 @@ class GoldenRunner:
 
     # ------------------------------------------------------------------ 入口
     def run(self) -> list[dict[str, Any]]:
-        manifest = self._load_manifest()
+        entries = self._load_cases()
         results: list[dict[str, Any]] = []
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
-        for entry in manifest["cases"]:
+        for entry in entries:
             name = entry["name"]
             if self.only_cases and name not in self.only_cases:
                 continue
             if self.resume and self._result_exists(name):
                 print(f"[skip] {name} 已有结果, 跳过(断点续跑)")
                 continue
-            print(f"\n=== 运行 case: {name} (category={entry['category']}, level={self.level}) ===")
+            print(f"\n=== 运行 case: {name} (category={entry.get('category')}, level={self.level}) ===")
             result = self._run_case(name, entry)
             results.append(result)
             self._save_result(name, result)
@@ -125,8 +125,20 @@ class GoldenRunner:
         return proc.stdout.strip()
 
     # ------------------------------------------------------------------ 加载
-    def _load_manifest(self) -> dict:
-        return json.loads((self.scenarios_dir / "manifest.json").read_text(encoding="utf-8"))
+    def _load_cases(self) -> list[dict[str, Any]]:
+        """case 列表: 优先 manifest.json; 无则扫描场景目录(playback 模式)。
+
+        playback 场景无 manifest, 按目录扫描(每个含 expected.json 的子目录一个 case),
+        category 默认 "playback"(只跑 Level 0, 不回放修复闭环)。
+        """
+        manifest_path = self.scenarios_dir / "manifest.json"
+        if manifest_path.is_file():
+            return list(json.loads(manifest_path.read_text(encoding="utf-8")).get("cases", []))
+        entries: list[dict[str, Any]] = []
+        for sub in sorted(self.scenarios_dir.iterdir()):
+            if sub.is_dir() and (sub / "expected.json").is_file():
+                entries.append({"name": sub.name, "category": "playback"})
+        return entries
 
     def _load_expected(self, name: str) -> dict:
         return json.loads((self.scenarios_dir / name / "expected.json").read_text(encoding="utf-8"))
