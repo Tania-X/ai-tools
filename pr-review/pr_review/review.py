@@ -46,12 +46,23 @@ class ReviewIssue:
     category: str = "other"  # bug / security / convention / design_intent / resource / type_consistency / other
     evidence: str = ""       # 判断依据(引用代码/契约位置)
     needs_review: bool = False  # 需人工确认(设计意图类不确定判断,不计入门禁)
+    # 同根因的多个位置(2026-08-14 合并契约): file+line 是主位置,
+    # locations 列出其余位置; 为空时按单位置处理。
+    locations: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ReviewIssue":
+        file = str(d.get("file", ""))
+        line = int(d.get("line", 0) or 0)
+        locations: list[dict[str, Any]] = []
+        for loc in d.get("locations", []) or []:
+            f = str(loc.get("file", ""))
+            ln = int(loc.get("line", 0) or 0)
+            if f and ln > 0:
+                locations.append({"file": f, "line": ln})
         return cls(
-            file=str(d.get("file", "")),
-            line=int(d.get("line", 0) or 0),
+            file=file,
+            line=line,
             severity=str(d.get("severity", "info")).lower(),
             title=str(d.get("title", "")),
             detail=str(d.get("detail", "")),
@@ -59,7 +70,18 @@ class ReviewIssue:
             category=str(d.get("category", "other")),
             evidence=str(d.get("evidence", "")),
             needs_review=bool(d.get("needs_review", False)),
+            locations=locations,
         )
+
+    def all_locations(self) -> list[tuple[str, int]]:
+        """返回全部位置(主位置 + locations), 去重保持顺序。"""
+        seen: set[tuple[str, int]] = set()
+        out: list[tuple[str, int]] = []
+        for f, ln in [(self.file, self.line)] + [(l["file"], l["line"]) for l in self.locations]:
+            if f and ln > 0 and (f, ln) not in seen:
+                seen.add((f, ln))
+                out.append((f, ln))
+        return out
 
 
 @dataclass
@@ -454,31 +476,35 @@ class ReviewRunner:
         for issue in result.issues:
             sev = issue.severity if issue.severity in counters else "info"
             counters[sev] += 1
-            if not issue.file or not issue.line:
-                continue  # 无行号:留整体评论
-            added = result.added_lines.get(issue.file)
-            if added is None or issue.line not in added:
-                continue  # 行号非新增行:留整体评论(避免 422)
-            comments.append(
-                {
-                    "path": issue.file,
-                    "line": issue.line,
-                    "side": "RIGHT",
-                    "body": self._inline_body(issue, ref=f"{sev.capitalize()} #{counters[sev]}"),
-                }
-            )
+            ref = f"{sev.capitalize()} #{counters[sev]}"
+            total_locs = len(issue.all_locations())
+            for pos, (f, ln) in enumerate(issue.all_locations(), start=1):
+                added = result.added_lines.get(f)
+                if added is None or ln not in added:
+                    continue  # 行号非新增行:留整体评论(避免 422)
+                comments.append(
+                    {
+                        "path": f,
+                        "line": ln,
+                        "side": "RIGHT",
+                        "body": self._inline_body(issue, ref=ref, total=total_locs, position=pos),
+                    }
+                )
         return comments
 
     @staticmethod
-    def _inline_body(issue: ReviewIssue, ref: str | None = None) -> str:
-        """行内评论正文: 引用主评论编号 + 标题 + 详情 + 建议 + 依据。
+    def _inline_body(issue: ReviewIssue, ref: str | None = None, total: int | None = None, position: int | None = None) -> str:
+        """行内评论正文: 引用主评论编号(含位置序号) + 标题 + 详情 + 建议 + 依据。
 
-        ref: 主评论里的分组编号(如 "Warn #2"), 让线程与整体评论可匹配。
+        ref: 主评论里的分组编号(如 "Warn #2"); total/position: 合并多位置时的位置序号。
         """
         icon = SEVERITY_ICONS.get(issue.severity, "🔵")
         parts: list[str] = []
         if ref:
-            parts.append(f"> 对应整体评论 **{ref}**")
+            prefix = f"对应整体评论 **{ref}**"
+            if total and total > 1:
+                prefix += f" · 位置 {position}/{total}"
+            parts.append(f"> {prefix}")
         parts.append(f"{icon} **{issue.title}**")
         if issue.needs_review:
             parts.append("> ⚠️ 需人工确认(设计意图类判断)")
@@ -516,7 +542,11 @@ class ReviewRunner:
                 continue
             lines.append(f"### {SEVERITY_ICONS[sev]} {sev.capitalize()} ({len(items)})")
             for idx, i in enumerate(items, start=1):
-                loc = f"`{i.file}`:{i.line}" if i.line else f"`{i.file}`"
+                locs = i.all_locations()
+                if len(locs) > 1:
+                    loc = ", ".join(f"`{f}`:{ln}" for f, ln in locs)
+                else:
+                    loc = f"`{i.file}`:{i.line}" if i.line else f"`{i.file}`"
                 title = f"{i.title} ⚠️" if i.needs_review else i.title
                 lines.append(f"{idx}. **{loc}** — {title}")
                 if i.needs_review:

@@ -92,3 +92,11 @@ def test_summary_requires_positive_feedback_when_no_issues():
     system = build_messages(PR, [], DEFAULT_CONFIG)[0]["content"]
     assert "正面评价" in system
     assert "无论是否发现问题都必须输出" in system
+
+
+def test_prompt_has_merge_and_severity_rules():
+    """prompt 含合并规则(规则16) + 严重度例外(规则13: 安全/权限/数据完整性可升 error)。"""
+    system = build_messages(PR, [], DEFAULT_CONFIG)[0]["content"]
+    assert "同根因合并" in system                          # 规则 16
+    assert "locations" in system                           # schema 多位置
+    assert "必须升 error" in system and "数据完整性" in system  # 规则 13 例外

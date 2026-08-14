@@ -539,3 +539,55 @@ def test_format_parse_failed_comment():
     assert "第 2 次评审" in comment
     assert "Unterminated string" in comment
     assert "rerun" in comment
+
+
+# ---------------------------------------------------------------- locations 多位置(2026-08-14 合并契约)
+def test_from_dict_parses_locations():
+    """locations 字段解析 + 单位置兼容。"""
+    d = {
+        "file": "a.py", "line": 10, "severity": "warn", "title": "t", "detail": "d", "suggestion": "s",
+        "locations": [{"file": "b.py", "line": 22}, {"file": "c.py", "line": 30}],
+    }
+    issue = ReviewIssue.from_dict(d)
+    assert issue.file == "a.py" and issue.line == 10
+    assert issue.all_locations() == [("a.py", 10), ("b.py", 22), ("c.py", 30)]
+
+
+def test_all_locations_dedupe_and_skip_invalid():
+    """主位置与 locations 重复/无效条目去重。"""
+    d = {
+        "file": "a.py", "line": 10, "severity": "warn", "title": "t", "detail": "d", "suggestion": "s",
+        "locations": [{"file": "a.py", "line": 10}, {"file": "b.py", "line": 0}, {"file": "", "line": 5}],
+    }
+    issue = ReviewIssue.from_dict(d)
+    assert issue.all_locations() == [("a.py", 10)]  # 重复 + 无效都被过滤
+
+
+def test_format_comment_multi_location():
+    """合并 issue 的主评论显示全部位置(逗号分隔)。"""
+    responses = [(
+        '{"summary": "s", "issues": [{"file": "a.py", "line": 1, "severity": "warn", '
+        '"title": "契约不一致", "detail": "d", "suggestion": "s", '
+        '"locations": [{"file": "b.py", "line": 2}, {"file": "c.py", "line": 3}]}]}'
+    )]
+    runner, _, _ = _make_runner(llm_responses=responses)
+    result = runner.run()
+    comment = runner.format_comment(result)
+    assert "`a.py`:1, `b.py`:2, `c.py`:3" in comment
+
+
+def test_inline_comments_multi_location():
+    """多位置 issue → 每个位置一个线程, 引用同编号 + 位置序号。"""
+    responses = [(
+        '{"summary": "s", "issues": [{"file": "src/auth.py", "line": 11, "severity": "warn", '
+        '"title": "契约不一致", "detail": "d", "suggestion": "s", '
+        '"locations": [{"file": "src/auth.py", "line": 13}]}]}'
+    )]
+    runner, _, _ = _make_runner(llm_responses=responses)
+    result = runner.run()
+    result.added_lines = {"src/auth.py": {11, 13}}  # 手工补充新增行集合
+    comments = runner.build_inline_comments(result)
+    assert len(comments) == 2
+    assert "对应整体评论 **Warn #1** · 位置 1/2" in comments[0]["body"]
+    assert "对应整体评论 **Warn #1** · 位置 2/2" in comments[1]["body"]
+    assert comments[0]["line"] == 11 and comments[1]["line"] == 13
