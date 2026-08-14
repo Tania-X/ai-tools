@@ -591,3 +591,8 @@ def test_inline_comments_multi_location():
     assert "对应整体评论 **`Warn #1`** · 位置 1/2" in comments[0]["body"]
     assert "对应整体评论 **`Warn #1`** · 位置 2/2" in comments[1]["body"]
     assert comments[0]["line"] == 11 and comments[1]["line"] == 13
+    # 多位置: 位置 1 展开 detail, 位置 2 精简(不重复 detail)——2026-08-14 用户反馈
+    assert "详情见整体评论" not in comments[0]["body"]   # 位置 1 完整
+    assert "详情见整体评论" in comments[1]["body"]       # 位置 2 精简
+    assert "💡" in comments[0]["body"]                    # 位置 1 有建议
+    assert "💡" not in comments[1]["body"]                # 位置 2 无重复

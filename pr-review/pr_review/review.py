@@ -497,6 +497,9 @@ class ReviewRunner:
         """行内评论正文: 引用主评论编号(含位置序号) + 标题 + 详情 + 建议 + 依据。
 
         ref: 主评论里的分组编号(如 "Warn #2"); total/position: 合并多位置时的位置序号。
+
+        多位置 issue: 只有位置 1 展开完整 detail, 其余位置精简(引用+标题+指向详情),
+        避免同一 issue 的 detail 在每个线程重复(2026-08-14 用户反馈)。
         """
         icon = SEVERITY_ICONS.get(issue.severity, "🔵")
         parts: list[str] = []
@@ -506,14 +509,19 @@ class ReviewRunner:
                 prefix += f" · 位置 {position}/{total}"
             parts.append(f"> {prefix}")
         parts.append(f"{icon} **{issue.title}**")
-        if issue.needs_review:
-            parts.append("> ⚠️ 需人工确认(设计意图类判断)")
-        if issue.detail:
-            parts.append(issue.detail)
-        if issue.suggestion:
-            parts.append(f"💡 {issue.suggestion}")
-        if issue.evidence:
-            parts.append(f"📎 依据: {issue.evidence}")
+        is_tail_location = bool(total and total > 1 and position and position > 1)
+        if is_tail_location:
+            # 位置 2/N...: 不重复 detail, 指向详情位置
+            parts.append(f"> 详情见整体评论 **`{ref}`** · 位置 1/{total}")
+        else:
+            if issue.needs_review:
+                parts.append("> ⚠️ 需人工确认(设计意图类判断)")
+            if issue.detail:
+                parts.append(issue.detail)
+            if issue.suggestion:
+                parts.append(f"💡 {issue.suggestion}")
+            if issue.evidence:
+                parts.append(f"📎 依据: {issue.evidence}")
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------ 评论生成
