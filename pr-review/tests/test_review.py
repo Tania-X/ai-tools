@@ -468,3 +468,47 @@ def test_handled_injected_into_prompt():
     assert "不要重复报" in user
     # 不传 handled 时无该段落
     assert "已处理清单" not in build_messages(PR, [fd], ReviewConfig())[1]["content"]
+
+
+# ---------------------------------------------------------------- 解析失败链路(2026-08-14 事故修复)
+BAD_JSON = '{"summary": "s", "issues": [{"file": "a.py", "title": "未终止'  # 截断的 JSON
+
+
+def test_review_batch_retries_bad_json_then_succeeds():
+    """chat 返回非法 JSON → 预检重试 → 第二次成功, 不误判。"""
+    runner, _, llm = _make_runner(llm_responses=[BAD_JSON, LLM_OK_JSON])
+    result = runner.run()
+    assert result.parse_errors == []          # 重试后成功, 无解析错误
+    assert len(result.issues) == 1            # 正常提取 issues
+    assert llm.chat.call_count == 2           # 原审 + 1 次重试
+
+
+def test_parse_error_marks_and_skips_quality_gate():
+    """重试耗尽仍非法 → parse_errors 标记 + 跳过质量门(judge 不调用), 不再静默 pass。"""
+    from unittest.mock import patch
+
+    from pr_review.quality import QualityConfig as QG  # noqa: F401 (仅占位)
+
+    runner, _, llm = _make_runner(
+        llm_responses=[BAD_JSON] * 4,  # 原审 + 重试都非法
+        config=ReviewConfig(quality_gate=QualityConfig(enabled=True)),
+    )
+    with patch("pr_review.quality.Judge.evaluate") as mocked_judge:
+        result = runner.run()
+    assert len(result.parse_errors) >= 1     # 失败被显式标记
+    assert result.quality_verdict == "degraded"  # 走降级通道(不 pass)
+    assert result.issues == []               # 无 issues 可发布
+    mocked_judge.assert_not_called()         # 关键: 不评估"失败产物"
+
+
+def test_format_parse_failed_comment():
+    from pr_review.review import ReviewResult
+
+    result = ReviewResult(model="deepseek-chat", review_no=2)
+    result.parse_errors = ["Unterminated string starting at: line 54 column 17"]
+    runner, _, _ = _make_runner(files=[])
+    comment = runner.format_parse_failed_comment(result)
+    assert "输出解析失败" in comment
+    assert "第 2 次评审" in comment
+    assert "Unterminated string" in comment
+    assert "rerun" in comment

@@ -169,6 +169,23 @@ def main() -> None:
         # 评审次数: 已有 AI review 数 + 1(显示"第 N 次评审")
         result.review_no = github.count_ai_reviews() + 1
 
+        # 审查输出解析失败(2026-08-14 事故修复):发说明评论 + check neutral,绝不静默 pass
+        if result.parse_errors:
+            pr = github.get_pr_info()
+            github.post_review(body=runner.format_parse_failed_comment(result), head_sha=pr.head_sha)
+            try:
+                github.create_check_run(
+                    "AI Review",
+                    head_sha=pr.head_sha,
+                    conclusion="neutral",
+                    title=f"[第{result.review_no}次] AI 审查输出解析失败(不阻塞合并)",
+                    summary=f"{len(result.parse_errors)} 个批次 JSON 解析失败,已跳过质量门;请 rerun 或人工 review",
+                )
+            except GitHubError as e:
+                logger.warning("创建 check-run 失败: %s", e)
+            logger.error("审查输出解析失败,跳过正常发布")
+            return
+
         # 质量门降级(P1b):不发低质量审查,发说明评论(附 issues 摘要) + check neutral(不拦合并)
         if result.quality_verdict == "degraded":
             pr = github.get_pr_info()

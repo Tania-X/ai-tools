@@ -82,6 +82,8 @@ class ReviewResult:
     quality_verdict: str | None = None  # pass / rewrite / degraded
     quality_reasons: list[str] = field(default_factory=list)
     rewrites: int = 0
+    # 审查输出 JSON 解析失败的批次(2026-08-14 事故后引入: 失败必须显式, 不能静默变空 issues)
+    parse_errors: list[str] = field(default_factory=list)
 
     @property
     def has_issues(self) -> bool:
@@ -200,7 +202,13 @@ class ReviewRunner:
     ) -> ReviewResult:
         """执行全部批次,汇总到 result(重写轮带 feedback 注入)。"""
         for idx, batch in enumerate(batches, start=1):
-            resp = self._review_batch(pr, batch, idx, len(batches), handled=handled, feedback=feedback)
+            try:
+                resp = self._review_batch(pr, batch, idx, len(batches), handled=handled, feedback=feedback)
+            except ValueError as e:
+                # 重试耗尽仍非法: 显式标记, 不静默降级成空 issues(2026-08-14 事故修复)
+                result.parse_errors.append(str(e))
+                logger.error("批次 %d 审查输出非法 JSON(重试耗尽): %s", idx, e)
+                continue
             summary = self._extract_summary(resp.content)
             if summary:  # 过滤空 summary,避免评论里出现空 bullet
                 result.summaries.append(summary)
@@ -225,8 +233,19 @@ class ReviewRunner:
         空 issues 短路(线上 bug 修复): 审查正确输出空 issues 时——
         - diff 无代码变更(纯文档/配置 PR)→ 跳过质量门直接 pass, 不浪费 token
         - diff 有代码变更 → 只做一次漏报检查(重写上限 1), 防止 judge 误判引发大循环
+
+        解析失败短路(2026-08-14 事故): 任一批次 JSON 解析失败 → 跳过质量门
+        (不评估"失败产物", 防 judge 把空 issues 误判为 pass), 直接 degraded。
         """
         from .quality import Judge
+
+        if result.parse_errors:
+            result.quality_verdict = "degraded"
+            logger.error(
+                "审查输出解析失败 %d 个批次, 跳过质量门: %s",
+                len(result.parse_errors), result.parse_errors[0][:200],
+            )
+            return result
 
         judge = Judge(llm=self.llm, config=self.config.quality_gate)
         diff_text = self._diff_text()
@@ -325,18 +344,29 @@ class ReviewRunner:
         handled: list[tuple[str, int]] | None = None,
         feedback: list[str] | None = None,
     ) -> ChatResponse:
+        """调 LLM 审查一批, 显式预检 JSON 合法性; 非法则重试, 耗尽抛 ValueError。
+
+        注意: LLMClient.chat 只返回文本不解析 JSON, 这里预检让重试真正生效
+        (旧实现等 chat 抛 ValueError 是死代码, 2026-08-14 事故根因之一)。
+        """
         messages = build_messages(
             pr, batch, self.config, batch_no, batch_total,
             repo_context=self.context, handled=handled, feedback=feedback,
         )
         last_err: Exception | None = None
-        for _ in range(self.max_retry_bad_json + 1):
+        for attempt in range(self.max_retry_bad_json + 1):
+            resp = self.llm.chat(
+                messages,
+                temperature=self.config.review_temperature,
+                max_tokens=self.config.review_max_tokens,
+            )
             try:
-                return self.llm.chat(messages, temperature=self.config.review_temperature)
-            except ValueError as e:  # JSON 解析失败:重试一次
+                parse_review_json(resp.content)  # 预检: JSON 合法才收
+                return resp
+            except ValueError as e:
                 last_err = e
-                logger.warning("LLM 输出非 JSON,重试: %s", e)
-        raise RuntimeError(f"LLM 多次返回非法 JSON,放弃: {last_err}")
+                logger.warning("LLM 输出非 JSON(第 %d 次, 共 %d): %s", attempt + 1, self.max_retry_bad_json + 1, e)
+        raise ValueError(f"LLM 多次返回非法 JSON,放弃: {last_err}")
 
     def _extract_summary(self, content: str) -> str:
         """从 JSON 中提取整体判断(失败时返回空串,不把原始 JSON 贴进评论)。"""
@@ -563,4 +593,27 @@ class ReviewRunner:
         if self.config.show_stats:
             lines.append("---")
             lines.append("_自动生成 · " + " · ".join(stats) + "_")
+        return "\n".join(lines)
+
+    def format_parse_failed_comment(self, result: ReviewResult) -> str:
+        """审查输出解析失败(2026-08-14 事故修复):发说明评论,告知用户审查未完成。"""
+        header = "## 🤖 AI 代码审查"
+        if result.review_no:
+            header += f" · 第 {result.review_no} 次评审"
+        lines = [
+            header,
+            "",
+            "⚠️ **本轮 AI 审查输出解析失败,未能完成审查**(已跳过质量门,不阻塞合并)。",
+            "",
+            "失败批次:",
+        ]
+        for e in result.parse_errors[:3]:
+            lines.append(f"- `{str(e)[:180]}`")
+        if len(result.parse_errors) > 3:
+            lines.append(f"- ... 共 {len(result.parse_errors)} 个批次解析失败")
+        lines += [
+            "",
+            "可能原因: 模型输出被截断(超出输出预算)或格式异常, 重试后仍失败。",
+            "建议: 稍后手动 rerun 本 workflow, 或进行人工 review。",
+        ]
         return "\n".join(lines)
