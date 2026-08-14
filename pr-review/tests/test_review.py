@@ -591,12 +591,11 @@ def test_inline_comments_multi_location():
     result = runner.run()
     result.added_lines = {"src/auth.py": {11, 13}}  # 手工补充新增行集合
     comments = runner.build_inline_comments(result)
-    assert len(comments) == 2
-    assert comments[0]["line"] == 11 and comments[1]["line"] == 13
-    # 每个线程自包含(detail 都在) + 自然语言标注其他位置(2026-08-14 反馈: 协议语言不可读)
-    for c in comments:
-        assert "**契约不一致**" in c["body"]
-        assert "d" in c["body"] and "💡 s" in c["body"]
-        assert "对应整体评论" not in c["body"]
-    assert "> 同问题还出现在: `src/auth.py`:13" in comments[0]["body"]
-    assert "> 同问题还出现在: `src/auth.py`:11" in comments[1]["body"]
+    # 多位置 issue 只发一个线程(第一个可定位位置)——2026-08-14 反馈: detail 一式二份
+    assert len(comments) == 1
+    assert comments[0]["line"] == 11
+    body = comments[0]["body"]
+    assert "**契约不一致**" in body
+    assert "d" in body and "💡 s" in body
+    assert "对应整体评论" not in body
+    assert "> 同问题还出现在: `src/auth.py`:13" in body

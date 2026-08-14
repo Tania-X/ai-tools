@@ -469,25 +469,31 @@ class ReviewRunner:
         GitHub API 约束: side=RIGHT 时 line 必须是该文件 diff 中的新增行, 否则 422。
         行号不在新增行集合内(如 LLM 给的是上下文行)的 issue 降级: 只留在整体评论。
 
-        2026-08-14 反馈: 之前用"对应整体评论 Error #1 · 位置 1/2"这种协议语言,
-        人类不可读。改为: 每个线程自包含(完整 detail) + 自然语言标注其他位置。
+        2026-08-14 反馈: ① 协议语言(位置 1/2)不可读 → 改为自然语言标注;
+        ② 多位置 issue 每位置一个线程导致 detail"一式二份" → 每个 issue 只发
+        第一个可定位位置的线程, 其余位置只在主评论列出 + 线程里自然语言标注。
         """
         comments: list[dict] = []
         for issue in result.issues:
             locs = issue.all_locations()
+            # 只取第一个可定位位置(其余位置不再单独发线程, 避免 detail 一式二份)
+            primary: tuple[str, int] | None = None
             for f, ln in locs:
                 added = result.added_lines.get(f)
-                if added is None or ln not in added:
-                    continue  # 行号非新增行:留整体评论(避免 422)
-                extra = [(x, y) for x, y in locs if (x, y) != (f, ln)]
-                comments.append(
-                    {
-                        "path": f,
-                        "line": ln,
-                        "side": "RIGHT",
-                        "body": self._inline_body(issue, extra_locations=extra),
-                    }
-                )
+                if added is not None and ln in added:
+                    primary = (f, ln)
+                    break
+            if primary is None:
+                continue  # 全部位置不可定位: 留整体评论
+            extra = [(x, y) for x, y in locs if (x, y) != primary]
+            comments.append(
+                {
+                    "path": primary[0],
+                    "line": primary[1],
+                    "side": "RIGHT",
+                    "body": self._inline_body(issue, extra_locations=extra),
+                }
+            )
         return comments
 
     @staticmethod

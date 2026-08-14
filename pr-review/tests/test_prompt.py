@@ -100,3 +100,9 @@ def test_prompt_has_merge_and_severity_rules():
     assert "同根因合并" in system                          # 规则 16
     assert "locations" in system                           # schema 多位置
     assert "必须升 error" in system and "数据完整性" in system  # 规则 13 例外
+
+
+def test_prompt_requires_fix_code_in_suggestion():
+    """suggestion 要求给出可参考的修复代码(2026-08-14 用户需求)。"""
+    system = build_messages(PR, [], DEFAULT_CONFIG)[0]["content"]
+    assert "修复代码" in system and "代码块" in system

@@ -110,7 +110,7 @@ SYSTEM_PROMPT = """你是一位资深代码审查专家,正在审查一个 Pull 
       "category": "bug | security | convention | design_intent | resource | type_consistency | other",
       "title": "简短的问题标题",
       "detail": "问题描述,说明为什么是问题",
-      "suggestion": "具体的修改建议",
+      "suggestion": "具体的修改建议;能给出修复代码时,用 Markdown 代码块给出可直接参考的修复代码(如完整函数或关键片段,标注文件与改动点)",
       "evidence": "判断依据:引用的代码/契约位置,如 'spec 中 CreateAgentRequest.authType 为 string, 而 AgentTarget.authType 为枚举'",
       "needs_review": false
     }
