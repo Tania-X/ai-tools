@@ -64,21 +64,32 @@ class GitHubAPI:
         return list(self._get(f"/repos/{self.repo}/pulls/{pr_number}/reviews", params={"per_page": 100}))
 
     # ------------------------------------------------------------------ 内部
+    # 网络类异常(非业务错误): 用户网络时好时坏(2026-08-14 回归崩溃根因), 统一重试
+    _NETWORK_ERRORS = (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectError)
+    _MAX_NETWORK_RETRIES = 4
+
     def _get(self, path: str, params: dict | None = None) -> Any:
-        resp = self._client.get(path, params=params)
-        return self._handle(resp, path)
+        return self._retry(lambda: self._client.get(path, params=params), path)
 
     def _post(self, path: str, payload: dict) -> Any:
-        resp = self._client.post(path, json=payload)
-        return self._handle(resp, path)
+        return self._retry(lambda: self._client.post(path, json=payload), path)
 
     def _patch(self, path: str, payload: dict) -> Any:
-        resp = self._client.patch(path, json=payload)
-        return self._handle(resp, path)
+        return self._retry(lambda: self._client.patch(path, json=payload), path)
 
     def _put(self, path: str, payload: dict) -> Any:
-        resp = self._client.put(path, json=payload)
-        return self._handle(resp, path)
+        return self._retry(lambda: self._client.put(path, json=payload), path)
+
+    def _retry(self, fn, path: str) -> Any:
+        last_err: Exception | None = None
+        for attempt in range(self._MAX_NETWORK_RETRIES):
+            try:
+                return self._handle(fn(), path)
+            except self._NETWORK_ERRORS as e:
+                last_err = e
+                print(f"  网络异常(第{attempt + 1}/{self._MAX_NETWORK_RETRIES}次): {type(e).__name__}, 重试 {path}")
+                time.sleep(3)
+        raise last_err  # 重试耗尽, 由上层(场景 skip)兜底
 
     @staticmethod
     def _handle(resp: httpx.Response, path: str) -> Any:

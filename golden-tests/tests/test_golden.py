@@ -155,3 +155,21 @@ def test_render_report_summary():
     assert "通过: 1 / 3" in report
     assert "case-bug" in report and "case-clean" in report
     assert "误报" in report  # 失败详情
+
+
+def test_network_retry_then_success():
+    """网络异常(ReadTimeout)重试后成功(2026-08-14 回归崩溃根因)。"""
+    import httpx
+    from unittest.mock import MagicMock
+
+    from golden.github_api import GitHubAPI
+
+    api = GitHubAPI.__new__(GitHubAPI)  # 不初始化 httpx client
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.json.return_value = {"ok": True}
+    api._client = MagicMock()
+    api._client.get.side_effect = [httpx.ReadTimeout("timeout"), fake_resp]
+    result = api._get("/repos/x/y")
+    assert result == {"ok": True}
+    assert api._client.get.call_count == 2
