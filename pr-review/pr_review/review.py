@@ -501,7 +501,7 @@ class ReviewRunner:
         icon = SEVERITY_ICONS.get(issue.severity, "🔵")
         parts: list[str] = []
         if ref:
-            prefix = f"对应整体评论 **{ref}**"
+            prefix = f"对应整体评论 **`{ref}`**"
             if total and total > 1:
                 prefix += f" · 位置 {position}/{total}"
             parts.append(f"> {prefix}")

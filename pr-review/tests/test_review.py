@@ -384,7 +384,7 @@ def test_inline_comment_has_main_comment_ref():
     runner, _, _ = _make_runner(llm_responses=responses)
     result = runner.run()
     comments = runner.build_inline_comments(result)
-    assert "对应整体评论 **Warn #1**" in comments[0]["body"]
+    assert "对应整体评论 **`Warn #1`**" in comments[0]["body"]
 
 
 def test_inline_comment_ref_aligns_when_earlier_issue_skipped():
@@ -399,7 +399,7 @@ def test_inline_comment_ref_aligns_when_earlier_issue_skipped():
     result = runner.run()
     comments = runner.build_inline_comments(result)
     assert len(comments) == 1
-    assert "对应整体评论 **Warn #2**" in comments[0]["body"]
+    assert "对应整体评论 **`Warn #2`**" in comments[0]["body"]
 
 
 def test_inline_body_includes_evidence_and_review_flag():
@@ -588,6 +588,6 @@ def test_inline_comments_multi_location():
     result.added_lines = {"src/auth.py": {11, 13}}  # 手工补充新增行集合
     comments = runner.build_inline_comments(result)
     assert len(comments) == 2
-    assert "对应整体评论 **Warn #1** · 位置 1/2" in comments[0]["body"]
-    assert "对应整体评论 **Warn #1** · 位置 2/2" in comments[1]["body"]
+    assert "对应整体评论 **`Warn #1`** · 位置 1/2" in comments[0]["body"]
+    assert "对应整体评论 **`Warn #1`** · 位置 2/2" in comments[1]["body"]
     assert comments[0]["line"] == 11 and comments[1]["line"] == 13
