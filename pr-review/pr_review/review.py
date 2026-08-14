@@ -468,60 +468,47 @@ class ReviewRunner:
 
         GitHub API 约束: side=RIGHT 时 line 必须是该文件 diff 中的新增行, 否则 422。
         行号不在新增行集合内(如 LLM 给的是上下文行)的 issue 降级: 只留在整体评论。
+
+        2026-08-14 反馈: 之前用"对应整体评论 Error #1 · 位置 1/2"这种协议语言,
+        人类不可读。改为: 每个线程自包含(完整 detail) + 自然语言标注其他位置。
         """
         comments: list[dict] = []
-        # 主评论按 severity 分组编号(1,2,3...), 这里对全部 issue 同步计数
-        # (包括无行号/非新增行留在整体评论的), 保证线程引用的编号与主评论一致
-        counters = {"error": 0, "warn": 0, "info": 0}
         for issue in result.issues:
-            sev = issue.severity if issue.severity in counters else "info"
-            counters[sev] += 1
-            ref = f"{sev.capitalize()} #{counters[sev]}"
-            total_locs = len(issue.all_locations())
-            for pos, (f, ln) in enumerate(issue.all_locations(), start=1):
+            locs = issue.all_locations()
+            for f, ln in locs:
                 added = result.added_lines.get(f)
                 if added is None or ln not in added:
                     continue  # 行号非新增行:留整体评论(避免 422)
+                extra = [(x, y) for x, y in locs if (x, y) != (f, ln)]
                 comments.append(
                     {
                         "path": f,
                         "line": ln,
                         "side": "RIGHT",
-                        "body": self._inline_body(issue, ref=ref, total=total_locs, position=pos),
+                        "body": self._inline_body(issue, extra_locations=extra),
                     }
                 )
         return comments
 
     @staticmethod
-    def _inline_body(issue: ReviewIssue, ref: str | None = None, total: int | None = None, position: int | None = None) -> str:
-        """行内评论正文: 引用主评论编号(含位置序号) + 标题 + 详情 + 建议 + 依据。
+    def _inline_body(issue: ReviewIssue, extra_locations: list[tuple[str, int]] | None = None) -> str:
+        """行内评论正文: 标题 + 详情 + 建议 + 依据 + (多位置时)其他位置标注。
 
-        ref: 主评论里的分组编号(如 "Warn #2"); total/position: 合并多位置时的位置序号。
-
-        多位置 issue: 只有位置 1 展开完整 detail, 其余位置精简(引用+标题+指向详情),
-        避免同一 issue 的 detail 在每个线程重复(2026-08-14 用户反馈)。
+        extra_locations: 同一问题的其他位置, 用自然语言标注("同问题还出现在: ...")。
         """
         icon = SEVERITY_ICONS.get(issue.severity, "🔵")
-        parts: list[str] = []
-        if ref:
-            prefix = f"对应整体评论 **`{ref}`**"
-            if total and total > 1:
-                prefix += f" · 位置 {position}/{total}"
-            parts.append(f"> {prefix}")
-        parts.append(f"{icon} **{issue.title}**")
-        is_tail_location = bool(total and total > 1 and position and position > 1)
-        if is_tail_location:
-            # 位置 2/N...: 不重复 detail, 指向详情位置
-            parts.append(f"> 详情见整体评论 **`{ref}`** · 位置 1/{total}")
-        else:
-            if issue.needs_review:
-                parts.append("> ⚠️ 需人工确认(设计意图类判断)")
-            if issue.detail:
-                parts.append(issue.detail)
-            if issue.suggestion:
-                parts.append(f"💡 {issue.suggestion}")
-            if issue.evidence:
-                parts.append(f"📎 依据: {issue.evidence}")
+        parts: list[str] = [f"{icon} **{issue.title}**"]
+        if issue.needs_review:
+            parts.append("> ⚠️ 需人工确认(设计意图类判断)")
+        if issue.detail:
+            parts.append(issue.detail)
+        if issue.suggestion:
+            parts.append(f"💡 {issue.suggestion}")
+        if issue.evidence:
+            parts.append(f"📎 依据: {issue.evidence}")
+        if extra_locations:
+            locs = ", ".join(f"`{f}`:{ln}" for f, ln in extra_locations)
+            parts.append(f"> 同问题还出现在: {locs}")
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------ 评论生成

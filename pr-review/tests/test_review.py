@@ -375,8 +375,8 @@ def test_build_inline_comments_skips_no_line():
     assert runner.build_inline_comments(result) == []
 
 
-def test_inline_comment_has_main_comment_ref():
-    """行内线程正文引用主评论的分组编号(2026-08-14 用户反馈: 线程与主评论无法匹配)。"""
+def test_inline_comment_self_contained():
+    """行内线程自包含: title + detail + suggestion 都在(2026-08-14 反馈: 协议语言不可读)。"""
     responses = [
         '{"summary": "s", "issues": [{"file": "src/auth.py", "line": 11, '
         '"severity": "warn", "title": "线程问题", "detail": "d", "suggestion": "s"}]}'
@@ -384,11 +384,15 @@ def test_inline_comment_has_main_comment_ref():
     runner, _, _ = _make_runner(llm_responses=responses)
     result = runner.run()
     comments = runner.build_inline_comments(result)
-    assert "对应整体评论 **`Warn #1`**" in comments[0]["body"]
+    body = comments[0]["body"]
+    assert "**线程问题**" in body
+    assert "d" in body and "💡 s" in body
+    assert "对应整体评论" not in body  # 无协议语言
+    assert "位置 1/" not in body       # 无位置序号协议
 
 
-def test_inline_comment_ref_aligns_when_earlier_issue_skipped():
-    """第一个 issue 无行号(留整体评论), 第二个可定位 → 线程引用应为 #2 而非 #1。"""
+def test_inline_comment_skips_unlocatable_issue():
+    """第一个 issue 无行号(留整体评论), 第二个可定位 → 只有可定位的发线程。"""
     responses = [
         '{"summary": "s", "issues": ['
         '{"file": "src/auth.py", "severity": "warn", "title": "无行号问题", "detail": "d", "suggestion": "s"},'
@@ -399,7 +403,7 @@ def test_inline_comment_ref_aligns_when_earlier_issue_skipped():
     result = runner.run()
     comments = runner.build_inline_comments(result)
     assert len(comments) == 1
-    assert "对应整体评论 **`Warn #2`**" in comments[0]["body"]
+    assert "**可定位问题**" in comments[0]["body"]
 
 
 def test_inline_body_includes_evidence_and_review_flag():
@@ -588,11 +592,11 @@ def test_inline_comments_multi_location():
     result.added_lines = {"src/auth.py": {11, 13}}  # 手工补充新增行集合
     comments = runner.build_inline_comments(result)
     assert len(comments) == 2
-    assert "对应整体评论 **`Warn #1`** · 位置 1/2" in comments[0]["body"]
-    assert "对应整体评论 **`Warn #1`** · 位置 2/2" in comments[1]["body"]
     assert comments[0]["line"] == 11 and comments[1]["line"] == 13
-    # 多位置: 位置 1 展开 detail, 位置 2 精简(不重复 detail)——2026-08-14 用户反馈
-    assert "详情见整体评论" not in comments[0]["body"]   # 位置 1 完整
-    assert "详情见整体评论" in comments[1]["body"]       # 位置 2 精简
-    assert "💡" in comments[0]["body"]                    # 位置 1 有建议
-    assert "💡" not in comments[1]["body"]                # 位置 2 无重复
+    # 每个线程自包含(detail 都在) + 自然语言标注其他位置(2026-08-14 反馈: 协议语言不可读)
+    for c in comments:
+        assert "**契约不一致**" in c["body"]
+        assert "d" in c["body"] and "💡 s" in c["body"]
+        assert "对应整体评论" not in c["body"]
+    assert "> 同问题还出现在: `src/auth.py`:13" in comments[0]["body"]
+    assert "> 同问题还出现在: `src/auth.py`:11" in comments[1]["body"]
