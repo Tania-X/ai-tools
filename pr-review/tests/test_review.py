@@ -375,6 +375,33 @@ def test_build_inline_comments_skips_no_line():
     assert runner.build_inline_comments(result) == []
 
 
+def test_inline_comment_has_main_comment_ref():
+    """行内线程正文引用主评论的分组编号(2026-08-14 用户反馈: 线程与主评论无法匹配)。"""
+    responses = [
+        '{"summary": "s", "issues": [{"file": "src/auth.py", "line": 11, '
+        '"severity": "warn", "title": "线程问题", "detail": "d", "suggestion": "s"}]}'
+    ]
+    runner, _, _ = _make_runner(llm_responses=responses)
+    result = runner.run()
+    comments = runner.build_inline_comments(result)
+    assert "对应整体评论 **Warn #1**" in comments[0]["body"]
+
+
+def test_inline_comment_ref_aligns_when_earlier_issue_skipped():
+    """第一个 issue 无行号(留整体评论), 第二个可定位 → 线程引用应为 #2 而非 #1。"""
+    responses = [
+        '{"summary": "s", "issues": ['
+        '{"file": "src/auth.py", "severity": "warn", "title": "无行号问题", "detail": "d", "suggestion": "s"},'
+        '{"file": "src/auth.py", "line": 11, "severity": "warn", "title": "可定位问题", "detail": "d", "suggestion": "s"}'
+        "]}"
+    ]
+    runner, _, _ = _make_runner(llm_responses=responses)
+    result = runner.run()
+    comments = runner.build_inline_comments(result)
+    assert len(comments) == 1
+    assert "对应整体评论 **Warn #2**" in comments[0]["body"]
+
+
 def test_inline_body_includes_evidence_and_review_flag():
     from pr_review.review import ReviewResult
 

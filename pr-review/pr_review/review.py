@@ -448,7 +448,12 @@ class ReviewRunner:
         行号不在新增行集合内(如 LLM 给的是上下文行)的 issue 降级: 只留在整体评论。
         """
         comments: list[dict] = []
+        # 主评论按 severity 分组编号(1,2,3...), 这里对全部 issue 同步计数
+        # (包括无行号/非新增行留在整体评论的), 保证线程引用的编号与主评论一致
+        counters = {"error": 0, "warn": 0, "info": 0}
         for issue in result.issues:
+            sev = issue.severity if issue.severity in counters else "info"
+            counters[sev] += 1
             if not issue.file or not issue.line:
                 continue  # 无行号:留整体评论
             added = result.added_lines.get(issue.file)
@@ -459,16 +464,22 @@ class ReviewRunner:
                     "path": issue.file,
                     "line": issue.line,
                     "side": "RIGHT",
-                    "body": self._inline_body(issue),
+                    "body": self._inline_body(issue, ref=f"{sev.capitalize()} #{counters[sev]}"),
                 }
             )
         return comments
 
     @staticmethod
-    def _inline_body(issue: ReviewIssue) -> str:
-        """行内评论正文:标题 + 详情 + 建议 + 依据,紧凑格式。"""
+    def _inline_body(issue: ReviewIssue, ref: str | None = None) -> str:
+        """行内评论正文: 引用主评论编号 + 标题 + 详情 + 建议 + 依据。
+
+        ref: 主评论里的分组编号(如 "Warn #2"), 让线程与整体评论可匹配。
+        """
         icon = SEVERITY_ICONS.get(issue.severity, "🔵")
-        parts = [f"{icon} **{issue.title}**"]
+        parts: list[str] = []
+        if ref:
+            parts.append(f"> 对应整体评论 **{ref}**")
+        parts.append(f"{icon} **{issue.title}**")
         if issue.needs_review:
             parts.append("> ⚠️ 需人工确认(设计意图类判断)")
         if issue.detail:
