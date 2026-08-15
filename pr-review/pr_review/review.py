@@ -394,7 +394,7 @@ class ReviewRunner:
                 repo_tools = None
         last_err: Exception | None = None
         for attempt in range(self.max_retry_bad_json + 1):
-            resp = self._chat_with_tools(messages, tools_cfg, repo_tools)
+            resp = self._chat_with_tools(messages, tools_cfg, repo_tools, force_json=(attempt > 0))
             try:
                 parse_review_json(resp.content)  # 预检: JSON 合法才收
                 return resp
@@ -408,11 +408,14 @@ class ReviewRunner:
         messages: list[dict],
         tools_cfg: Any,
         repo_tools: RepoTools | None,
+        force_json: bool = False,
     ) -> ChatResponse:
         """多轮工具循环: 模型请求工具 → 执行 → 回填, 直到模型直接输出(无 tool_calls)。
 
-        - 硬上限 max_tool_calls, 超出抛 ValueError(防 agent 无限探索)
+        - 硬上限 max_tool_calls, 超出抛 ToolLoopError(防 agent 无限探索)
         - 工具执行失败不中断(结果文本带错误说明回填给模型)
+        - force_json=True(重试轮): 禁用工具, 强制 response_format=json_object,
+          根治"模型工具探索后跑偏输出对话文本"(PR#6 第 2 次评审事故)
         """
         tools_schema = TOOL_SCHEMAS if (tools_cfg.enabled and repo_tools is not None) else None
         for _ in range(tools_cfg.max_tool_calls + 1):
@@ -420,7 +423,8 @@ class ReviewRunner:
                 messages,
                 temperature=self.config.review_temperature,
                 max_tokens=self.config.review_max_tokens,
-                tools=tools_schema,
+                tools=None if force_json else tools_schema,
+                response_format={"type": "json_object"} if force_json else None,
             )
             if not resp.tool_calls:
                 return resp

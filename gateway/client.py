@@ -61,6 +61,7 @@ class LLMClient:
         timeout: float | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
+        response_format: dict | None = None,
     ) -> ChatResponse:
         pc = self.config.get(provider)
         payload = {
@@ -73,6 +74,8 @@ class LLMClient:
             payload["tools"] = tools
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
+        if response_format is not None:
+            payload["response_format"] = response_format
         url = pc.base_url.rstrip("/") + "/chat/completions"
 
         data, used_key = self._call_with_retry(pc, url, payload, timeout or pc.timeout)
