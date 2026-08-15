@@ -95,11 +95,13 @@ def test_summary_requires_positive_feedback_when_no_issues():
 
 
 def test_prompt_has_merge_and_severity_rules():
-    """prompt 含合并规则(规则16) + 严重度例外(规则13: 安全/权限/数据完整性可升 error)。"""
+    """prompt 含合并规则(规则15) + 收敛规则(规则16) + 严重度策略(非原则性一律 warn)。"""
     system = build_messages(PR, [], DEFAULT_CONFIG)[0]["content"]
-    assert "同根因合并" in system                          # 规则 16
+    assert "同根因合并" in system                          # 规则 15
     assert "locations" in system                           # schema 多位置
-    assert "必须升 error" in system and "数据完整性" in system  # 规则 13 例外
+    assert "审查收敛" in system and "换角度" in system      # 规则 16 收敛性
+    assert "一律 warn" in system and "不得升 error" in system  # 规则 8 非原则性策略
+    assert "必然触发或可直接利用" in system               # 规则 7 error 标准
 
 
 def test_prompt_requires_fix_code_in_suggestion():
