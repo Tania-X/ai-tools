@@ -12,6 +12,7 @@ v2 改进(基于第一轮 review 质量评估, devops-dashboard PR #2):
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from .config import ReviewConfig
@@ -199,17 +200,43 @@ def build_messages(
 def parse_review_json(content: str) -> dict[str, Any]:
     """容错解析 LLM 输出的 JSON。
 
-    LLM 偶尔会加 ```json 围栏或前后多余文本,这里做轻量清理。
+    LLM 偶尔会加 ```json 围栏、前后多余文本、单引号或未加引号的 key
+    (工具历史消息变长后格式漂移更频繁),这里做多级容错。
     """
     text = content.strip()
-    # 去掉 markdown 围栏
+    # 1. 去掉 markdown 围栏
     if text.startswith("```"):
         text = text.strip("`")
         if text.startswith("json"):
             text = text[4:]
         text = text.strip()
-    # 截取第一个 { 到最后一个 }(容错额外说明文本)
+    # 2. 截取第一个 { 到最后一个 }(容错额外说明文本)
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1 or end <= start:
         raise ValueError(f"LLM 输出中未找到 JSON 对象: {content[:200]!r}")
-    return json.loads(text[start : end + 1])
+    raw = text[start : end + 1]
+    try:
+        return json.loads(raw)
+    except ValueError:
+        # 3. 修复非严格 JSON(无引号 key / 单引号字符串)再解析
+        repaired = _repair_json(raw)
+        try:
+            return json.loads(repaired)
+        except ValueError as e:
+            raise ValueError(f"LLM 输出非法 JSON(修复后仍失败): {e}: {raw[:200]!r}") from e
+
+
+# 无引号 key: {summary: ...} / ,issues: [...](修复为 "summary": ...)
+_JSON_KEY_RE = re.compile(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)")
+# 成对单引号字符串(保守: 内部反斜杠转义参与匹配)
+_JSON_SINGLE_QUOTE_RE = re.compile(r"'((?:[^'\\]|\\.)*)'")
+
+
+def _repair_json(raw: str) -> str:
+    """LLM 非严格 JSON 修复: 无引号 key 补引号 + 单引号字符串转双引号。
+
+    仅在严格 json.loads 失败后作为兜底; 修复后仍失败则由调用方抛错。
+    """
+    s = _JSON_KEY_RE.sub(r'\1"\2"\3', raw)
+    s = _JSON_SINGLE_QUOTE_RE.sub(r'"\1"', s)
+    return s

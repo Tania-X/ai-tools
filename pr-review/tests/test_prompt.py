@@ -82,6 +82,28 @@ def test_parse_review_json_with_trailing_text():
     assert data["summary"] == "ok"
 
 
+def test_parse_review_json_unquoted_keys():
+    """无引号 key 的 LLM 非严格 JSON(工具场景常见)应修复解析。"""
+    raw = '{summary: "ok", issues: [{file: "a.py", line: 1, severity: "warn", title: "t", detail: "d"}]}'
+    data = parse_review_json(raw)
+    assert data["summary"] == "ok"
+    assert data["issues"][0]["file"] == "a.py"
+
+
+def test_parse_review_json_single_quotes():
+    """单引号字符串的 LLM 非严格 JSON 应修复解析。"""
+    raw = "{'summary': 'ok', 'issues': []}"
+    data = parse_review_json(raw)
+    assert data["summary"] == "ok"
+
+
+def test_parse_review_json_single_quote_plus_unquoted():
+    """单引号 + 无引号 key 混合。"""
+    raw = "{summary: 'ok', issues: []}"
+    data = parse_review_json(raw)
+    assert data["summary"] == "ok"
+
+
 def test_parse_review_json_invalid():
     with pytest.raises(ValueError):
         parse_review_json("no json here")
