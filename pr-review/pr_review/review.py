@@ -394,15 +394,25 @@ class ReviewRunner:
                 repo_tools = None
         last_err: Exception | None = None
         for attempt in range(self.max_retry_bad_json + 1):
+            msgs = messages
+            if attempt > 0:
+                # 注入纠正提示: 模型可能输出工具调用文本/解释而非 JSON(PR#8 第 2 次评审事故)
+                msgs = messages + [{
+                    "role": "user",
+                    "content": (
+                        "你之前的输出无效: 必须直接输出 JSON 审查结果(含 summary 与 issues), "
+                        "不要输出工具调用文本(<tool_calls> 等)、解释或任何其他内容。"
+                    ),
+                }]
             if attempt == 0:
                 # 首轮: 完整工具探索
-                resp = self._chat_with_tools(messages, tools_cfg, repo_tools)
+                resp = self._chat_with_tools(msgs, tools_cfg, repo_tools)
             elif attempt == 1:
                 # 重试 1: 禁工具 + json_object 强制(根治跑偏/非严格 JSON)
-                resp = self._chat_with_tools(messages, tools_cfg, repo_tools, force_json=True)
+                resp = self._chat_with_tools(msgs, tools_cfg, repo_tools, force_json=True)
             else:
                 # 重试 2+: json mode 可能空输出(DeepSeek 已知缺陷), 退回禁工具普通输出, 靠 parse 容错
-                resp = self._chat_with_tools(messages, tools_cfg, repo_tools, force_json=True, use_json_mode=False)
+                resp = self._chat_with_tools(msgs, tools_cfg, repo_tools, force_json=True, use_json_mode=False)
             try:
                 parse_review_json(resp.content)  # 预检: JSON 合法才收
                 return resp
