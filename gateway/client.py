@@ -26,6 +26,7 @@ class ChatResponse:
     provider: str
     usage: dict = field(default_factory=dict)  # prompt_tokens / completion_tokens ...
     cost: float = 0.0  # 元(未配置单价时为 0)
+    tool_calls: list | None = None  # [{id, name, arguments}] — 模型请求调用工具时非空
 
     @property
     def prompt_tokens(self) -> int:
@@ -58,6 +59,8 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         timeout: float | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
     ) -> ChatResponse:
         pc = self.config.get(provider)
         payload = {
@@ -66,11 +69,26 @@ class LLMClient:
             "max_tokens": max_tokens or pc.max_tokens,
             "temperature": temperature if temperature is not None else pc.temperature,
         }
+        if tools is not None:
+            payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
         url = pc.base_url.rstrip("/") + "/chat/completions"
 
         data, used_key = self._call_with_retry(pc, url, payload, timeout or pc.timeout)
 
-        content = data["choices"][0]["message"].get("content", "")
+        msg = data["choices"][0]["message"]
+        content = msg.get("content", "") or ""
+        tool_calls = None
+        if msg.get("tool_calls"):
+            tool_calls = [
+                {
+                    "id": tc["id"],
+                    "name": tc["function"]["name"],
+                    "arguments": tc["function"].get("arguments", "{}"),
+                }
+                for tc in msg["tool_calls"]
+            ]
         usage = data.get("usage", {})
         cost = self._compute_cost(pc, usage)
         self.prompt_tokens += usage.get("prompt_tokens", 0)
@@ -83,6 +101,7 @@ class LLMClient:
             provider=pc.name,
             usage=usage,
             cost=cost,
+            tool_calls=tool_calls,
         )
 
     # ------------------------------------------------------------ 重试 + 多 key 轮询

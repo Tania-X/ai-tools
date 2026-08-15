@@ -20,10 +20,15 @@ from .diff import DiffHunk, FileDiff, parse_diff
 from .github import GitHubClient, PRInfo
 from .prompt import build_messages, parse_review_json
 from .reply import RESOLUTION_MARK_RE
+from .repo_tools import TOOL_SCHEMAS, RepoTools
 
 logger = logging.getLogger("pr_review")
 
 SEVERITY_ICONS = {"error": "🔴", "warn": "🟡", "info": "🔵"}
+
+
+class ToolLoopError(RuntimeError):
+    """工具循环超上限(模型持续请求工具不输出), 显式失败而非静默跳过。"""
 
 # 生成代码识别标记(文件头命中任一即视为生成代码,跳过审查)
 _GENERATED_MARKERS = (
@@ -366,7 +371,7 @@ class ReviewRunner:
         handled: list[tuple[str, int]] | None = None,
         feedback: list[str] | None = None,
     ) -> ChatResponse:
-        """调 LLM 审查一批, 显式预检 JSON 合法性; 非法则重试, 耗尽抛 ValueError。
+        """调 LLM 审查一批(agentic: 可调用工具查看仓库代码), 显式预检 JSON 合法性。
 
         注意: LLMClient.chat 只返回文本不解析 JSON, 这里预检让重试真正生效
         (旧实现等 chat 抛 ValueError 是死代码, 2026-08-14 事故根因之一)。
@@ -375,13 +380,21 @@ class ReviewRunner:
             pr, batch, self.config, batch_no, batch_total,
             repo_context=self.context, handled=handled, feedback=feedback,
         )
+        tools_cfg = self.config.review_tools
+        repo_tools = None
+        if tools_cfg.enabled and self.repo_root:
+            try:
+                repo_tools = RepoTools(
+                    self.repo_root,
+                    max_file_lines=tools_cfg.max_file_lines,
+                    max_result_chars=tools_cfg.max_result_chars,
+                )
+            except (TypeError, ValueError, OSError):
+                logger.warning("repo_root 无效, 禁用仓库访问工具: %s", self.repo_root)
+                repo_tools = None
         last_err: Exception | None = None
         for attempt in range(self.max_retry_bad_json + 1):
-            resp = self.llm.chat(
-                messages,
-                temperature=self.config.review_temperature,
-                max_tokens=self.config.review_max_tokens,
-            )
+            resp = self._chat_with_tools(messages, tools_cfg, repo_tools)
             try:
                 parse_review_json(resp.content)  # 预检: JSON 合法才收
                 return resp
@@ -389,6 +402,50 @@ class ReviewRunner:
                 last_err = e
                 logger.warning("LLM 输出非 JSON(第 %d 次, 共 %d): %s", attempt + 1, self.max_retry_bad_json + 1, e)
         raise ValueError(f"LLM 多次返回非法 JSON,放弃: {last_err}")
+
+    def _chat_with_tools(
+        self,
+        messages: list[dict],
+        tools_cfg: Any,
+        repo_tools: RepoTools | None,
+    ) -> ChatResponse:
+        """多轮工具循环: 模型请求工具 → 执行 → 回填, 直到模型直接输出(无 tool_calls)。
+
+        - 硬上限 max_tool_calls, 超出抛 ValueError(防 agent 无限探索)
+        - 工具执行失败不中断(结果文本带错误说明回填给模型)
+        """
+        tools_schema = TOOL_SCHEMAS if (tools_cfg.enabled and repo_tools is not None) else None
+        for _ in range(tools_cfg.max_tool_calls + 1):
+            resp = self.llm.chat(
+                messages,
+                temperature=self.config.review_temperature,
+                max_tokens=self.config.review_max_tokens,
+                tools=tools_schema,
+            )
+            if not resp.tool_calls:
+                return resp
+            # 模型请求工具: 回填 assistant 消息(含 tool_calls)
+            messages.append({
+                "role": "assistant",
+                "content": resp.content or "",
+                "tool_calls": [
+                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                    for tc in resp.tool_calls
+                ],
+            })
+            for tc in resp.tool_calls:
+                try:
+                    args = json.loads(tc.get("arguments") or "{}")
+                    result = repo_tools.execute(tc["name"], args)
+                except Exception as e:  # 兜底: 工具异常不中断审查
+                    logger.warning("工具执行异常 %s: %s", tc.get("name"), e)
+                    result = f"工具执行异常: {type(e).__name__}: {e}"
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result[: tools_cfg.max_result_chars],
+                })
+        raise ToolLoopError(f"工具调用超上限(max_tool_calls={tools_cfg.max_tool_calls})")
 
     def _extract_summary(self, content: str) -> str:
         """从 JSON 中提取整体判断(失败时返回空串,不把原始 JSON 贴进评论)。"""

@@ -41,6 +41,20 @@ class QualityConfig:
 
 
 @dataclass
+class ReviewToolsConfig:
+    """agentic 审查工具(仓库代码访问, 形态二, 2026-08-15)。"""
+
+    # 一键开关: 关闭则审查退化为纯 prompt(不注入工具)
+    enabled: bool = True
+    # 单轮审查最多工具调用次数(硬上限, 防 agent 无限探索)
+    max_tool_calls: int = 12
+    # 单次工具结果最多字符(防 token 爆炸)
+    max_result_chars: int = 6000
+    # 单文件最多读多少行(防大文件爆上下文)
+    max_file_lines: int = 200
+
+
+@dataclass
 class ReviewConfig:
     # 审查重点(直接作为指令进入 prompt)
     review_focus: list[str] = field(
@@ -107,6 +121,8 @@ class ReviewConfig:
     # 审查批次输出预算(token): gateway 默认 max_tokens=1024 太小,
     # 多 issues JSON 会被截断成非法 JSON → 静默空结果事故(2026-08-14 线上 bug)
     review_max_tokens: int = 4096
+    # agentic 审查工具(仓库代码访问, 形态二)
+    review_tools: ReviewToolsConfig = field(default_factory=ReviewToolsConfig)
 
     def severity_rank(self, severity: str) -> int:
         s = (severity or "info").strip().lower()
@@ -174,6 +190,17 @@ def load_config(path: str | Path | None = None) -> ReviewConfig:
         cfg.review_temperature = float(data["review_temperature"])
     if "review_max_tokens" in data:
         cfg.review_max_tokens = int(data["review_max_tokens"])
+    # review_tools 块(agentic 仓库访问)
+    rt = data.get("review_tools") or {}
+    if isinstance(rt, dict):
+        if "enabled" in rt:
+            cfg.review_tools.enabled = bool(rt["enabled"])
+        if "max_tool_calls" in rt:
+            cfg.review_tools.max_tool_calls = int(rt["max_tool_calls"])
+        if "max_result_chars" in rt:
+            cfg.review_tools.max_result_chars = int(rt["max_result_chars"])
+        if "max_file_lines" in rt:
+            cfg.review_tools.max_file_lines = int(rt["max_file_lines"])
     # quality_gate 块(缺失则用默认; lint 层首版仅预留)
     qg = data.get("quality_gate") or {}
     if isinstance(qg, dict):
