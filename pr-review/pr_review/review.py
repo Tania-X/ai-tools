@@ -418,16 +418,23 @@ class ReviewRunner:
           根治"模型工具探索后跑偏输出对话文本"(PR#6 第 2 次评审事故)
         """
         tools_schema = TOOL_SCHEMAS if (tools_cfg.enabled and repo_tools is not None) else None
-        for _ in range(tools_cfg.max_tool_calls + 1):
+        # 自动收敛: 工具探索只给前 2/3 轮, 最后阶段强制 JSON 输出(防模型无限探索, PR#7 教训)
+        force_cutoff = max(tools_cfg.max_tool_calls - 2, 1)
+        for i in range(tools_cfg.max_tool_calls + 1):
+            force = force_json or i >= force_cutoff
             resp = self.llm.chat(
                 messages,
                 temperature=self.config.review_temperature,
                 max_tokens=self.config.review_max_tokens,
-                tools=None if force_json else tools_schema,
-                response_format={"type": "json_object"} if force_json else None,
+                tools=None if force else tools_schema,
+                response_format={"type": "json_object"} if force else None,
             )
             if not resp.tool_calls:
                 return resp
+            if force:
+                # 强制轮理论上无工具可调; 若模型仍返回 tool_calls(异常), 不执行工具, 继续到上限
+                logger.warning("强制收敛轮模型仍返回 tool_calls, 忽略")
+                continue
             # 模型请求工具: 回填 assistant 消息(含 tool_calls)
             logger.info("模型调用工具: %s", [tc.get("name") for tc in resp.tool_calls])
             messages.append({
