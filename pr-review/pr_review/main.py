@@ -35,7 +35,7 @@ from pr_review.config import load_config as load_review_config  # noqa: E402
 from pr_review.config import ReviewConfig  # noqa: E402
 from pr_review.context import ContextCollector  # noqa: E402
 from pr_review.github import GitHubClient, GitHubError  # noqa: E402
-from pr_review.review import ReviewRunner, ReviewResult  # noqa: E402
+from pr_review.review import ReviewRunner, ReviewResult, ToolLoopError  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("pr_review.main")
@@ -164,7 +164,32 @@ def main() -> None:
             repo_root=repo_root,
             context=context,
         )
-        result = runner.run()
+        try:
+            result = runner.run()
+        except ToolLoopError as e:
+            # 工具循环超限(agentic 探索失控):发说明评论 + check neutral,不阻塞合并也不崩 workflow
+            logger.error("工具循环超限: %s", e)
+            pr = github.get_pr_info()
+            github.post_review(
+                body=(
+                    "⚠️ **本轮 AI 审查工具调用超限,未能完成审查**(已跳过质量门,不阻塞合并)。\n\n"
+                    f"- `{e}`\n\n"
+                    "可能原因: 模型在探索仓库代码时陷入循环,未收敛到审查结论。\n"
+                    "建议: 稍后手动 rerun 本 workflow, 或进行人工 review。"
+                ),
+                head_sha=pr.head_sha,
+            )
+            try:
+                github.create_check_run(
+                    "AI Review",
+                    head_sha=pr.head_sha,
+                    conclusion="neutral",
+                    title="AI 审查工具调用超限(不阻塞合并)",
+                    summary="模型工具探索超上限,未产出审查;请 rerun 或人工 review",
+                )
+            except GitHubError as ge:
+                logger.warning("创建 check-run 失败: %s", ge)
+            return
 
         # 评审次数: 已有 AI review 数 + 1(显示"第 N 次评审")
         result.review_no = github.count_ai_reviews() + 1
