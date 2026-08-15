@@ -394,7 +394,15 @@ class ReviewRunner:
                 repo_tools = None
         last_err: Exception | None = None
         for attempt in range(self.max_retry_bad_json + 1):
-            resp = self._chat_with_tools(messages, tools_cfg, repo_tools, force_json=(attempt > 0))
+            if attempt == 0:
+                # 首轮: 完整工具探索
+                resp = self._chat_with_tools(messages, tools_cfg, repo_tools)
+            elif attempt == 1:
+                # 重试 1: 禁工具 + json_object 强制(根治跑偏/非严格 JSON)
+                resp = self._chat_with_tools(messages, tools_cfg, repo_tools, force_json=True)
+            else:
+                # 重试 2+: json mode 可能空输出(DeepSeek 已知缺陷), 退回禁工具普通输出, 靠 parse 容错
+                resp = self._chat_with_tools(messages, tools_cfg, repo_tools, force_json=True, use_json_mode=False)
             try:
                 parse_review_json(resp.content)  # 预检: JSON 合法才收
                 return resp
@@ -409,13 +417,15 @@ class ReviewRunner:
         tools_cfg: Any,
         repo_tools: RepoTools | None,
         force_json: bool = False,
+        use_json_mode: bool = True,
     ) -> ChatResponse:
         """多轮工具循环: 模型请求工具 → 执行 → 回填, 直到模型直接输出(无 tool_calls)。
 
         - 硬上限 max_tool_calls, 超出抛 ToolLoopError(防 agent 无限探索)
         - 工具执行失败不中断(结果文本带错误说明回填给模型)
-        - force_json=True(重试轮): 禁用工具, 强制 response_format=json_object,
-          根治"模型工具探索后跑偏输出对话文本"(PR#6 第 2 次评审事故)
+        - force_json=True(重试轮): 禁用工具, 强制模型直接输出
+        - use_json_mode: 是否加 response_format=json_object(DeepSeek 该模式偶发空输出,
+          重试 2+ 轮关闭, 靠 parse_review_json 容错兜底)
         """
         tools_schema = TOOL_SCHEMAS if (tools_cfg.enabled and repo_tools is not None) else None
         # 自动收敛: 工具探索只给前 2/3 轮, 最后阶段强制 JSON 输出(防模型无限探索, PR#7 教训)
@@ -427,7 +437,7 @@ class ReviewRunner:
                 temperature=self.config.review_temperature,
                 max_tokens=self.config.review_max_tokens,
                 tools=None if force else tools_schema,
-                response_format={"type": "json_object"} if force else None,
+                response_format={"type": "json_object"} if (force and use_json_mode) else None,
             )
             if not resp.tool_calls:
                 return resp
