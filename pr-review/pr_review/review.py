@@ -425,6 +425,7 @@ class ReviewRunner:
             if not resp.tool_calls:
                 return resp
             # 模型请求工具: 回填 assistant 消息(含 tool_calls)
+            logger.info("模型调用工具: %s", [tc.get("name") for tc in resp.tool_calls])
             messages.append({
                 "role": "assistant",
                 "content": resp.content or "",
