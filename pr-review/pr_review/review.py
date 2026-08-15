@@ -134,7 +134,7 @@ class ReviewRunner:
         llm: LLMClient,
         config: ReviewConfig,
         *,
-        max_retry_bad_json: int = 1,
+        max_retry_bad_json: int = 3,
         repo_root: str | Path | None = None,
         context: str = "",
     ):
