@@ -173,7 +173,7 @@ def test_format_comment_shows_quality_score():
 
     result = ReviewResult()
     result.summaries = ["结构清晰"]
-    result.issues = [ReviewIssue(file="a.go", line=1, severity="warn", title="t", detail="d")]
+    result.issues = [ReviewIssue(file="a.go", line=1, severity="warn", title="t", detail="d", suggestion="s")]
     result.quality_score = 85.0
     result.quality_verdict = "pass"
     comment = ReviewRunner.__new__(ReviewRunner).format_comment(result)
