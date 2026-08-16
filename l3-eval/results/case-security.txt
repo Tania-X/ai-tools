@@ -1,0 +1,49 @@
+排查完成。基于 repo-tools 的确认,给出审查结论。
+
+## 排查过程简述
+
+- **基线确认**:`l3-eval/case-security/src/main.go`(17 行)与 diff 的 `a/` 侧完全一致——带 `main()` 打印 `"golden test baseline"` 的"无问题"基线(`run_claude_eval.py:33` 定义 case-security 为"安全类问题")。
+- **影响面确认**:全仓 `grep getUserByID|dbPassword|case-security` 无任何既有调用方;`grep l3-eval` 仅命中 eval 驱动器(`run_claude_eval.py`)、结果文件和 memory,无 go.mod / 构建 / 测试引用这些 Go 文件。`golden-tests/` 框架用的是外部仓库 `Tania-X/ai-review-golden-tests` 的场景,不依赖本目录。**结论:该改动不破坏任何未变更的既有代码,问题全部集中在改动后的文件自身。**
+- **期望对照**:`docs/golden-testing.md:183` 记录 case-security 的已知缺陷为"SQL 注入 + 硬编码密码",与本次审查发现一致。
+
+---
+
+## 审查结论:发现问题(2 error + 2 warn)
+
+### 1. SQL 注入 —— **error**
+
+- **位置**:`src/main.go:16`(`query := "SELECT * FROM users WHERE id = '" + id + "'"`,由 17 行 `db.QueryRow(query)` 执行)
+- **问题**:`id` 是外部可控的 `string`,未经任何转义/校验直接拼接进 SQL。攻击者传入 `"1' OR '1'='1"` 即可绕过查询条件、读出全表;若 `users` 表含敏感列(结合 12 行暴露的 `dbPassword`,这是真实数据查询),可被拖库。属 OWASP A03:2021-Injection / CWE-89。且 `User.ID` 是 `int`,用字符串字面量比较整型列,还叠加了类型不一致的隐患。
+- **修复建议**:
+  ```go
+  row := db.QueryRow("SELECT * FROM users WHERE id = ?", id) // MySQL/SQLite; PostgreSQL 用 $1
+  ```
+
+### 2. 硬编码数据库密码 —— **error**
+
+- **位置**:`src/main.go:12`(`const dbPassword = "admin123"`)
+- **问题**:数据库凭据以明文写死在源码中(OWASP A07:2021 / CWE-798),会随源码进入版本库、泄露给所有拿到代码的人;且该常量全文件无任何引用,是死代码。即便本场景是示例,也应避免在代码中固化真实凭据。
+- **修复建议**:删除该常量;若确需凭据,从环境变量/配置文件/密钥服务注入,如 `os.Getenv("DB_PASSWORD")`,并在 `.gitignore` 中排除密钥文件。
+
+### 3. `package main` 失去 `main` 入口,文件无法构建/运行 —— **warn**
+
+- **位置**:`src/main.go:2`(`package main` 下已无 `func main`;对比 `a/` 侧的 `// main 是程序入口。` + `func main()`)
+- **问题**:原文件是独立的可执行程序(`go build` 可直接产出二进制),改动删除了唯一入口。`package main` 若无 `func main`,`go build` 会报 `function main is undeclared in the main package`,文件既不能运行也无法作为库被导入(未导出符号 + `package main`)。同时文件头"golden 测试基线"的定位说明被替换,与 `run_claude_eval.py` 中该目录作为基线副本的用途语义脱节。
+- **修复建议**:若需保留可运行程序,补回 `main()` 或 `func main()` 的测试入口;若意图是供外部调用的查询函数,应改用库包名(如 `package user`)并把 `getUserByID` 导出为 `GetUserByID`。
+
+### 4. 出错时仍返回非 nil 指针,调用方判空失效 —— **warn**
+
+- **位置**:`src/main.go:19-20`(`err := row.Scan(&u.ID, &u.Name); return &u, err`)
+- **问题**:`row.Scan` 出错时(典型如 `sql.ErrNoRows`),函数仍返回非 nil 的 `&u`(零值 `ID=0, Name=""`)。调用方若按 `u == nil` 判断"查无记录"将永远为 false,拿到零值用户继续使用,可能掩盖错误或产生错误业务逻辑。
+- **修复建议**:
+  ```go
+  err := row.Scan(&u.ID, &u.Name)
+  if err != nil {
+      return nil, err
+  }
+  return &u, nil
+  ```
+
+---
+
+**总体结论**:该 diff 引入两个必须修复的安全问题(SQL 注入、硬编码密码,均为 error);另有两个 warn(入口丢失导致不可构建、错误路径返回非 nil 指针)。改动未影响仓库中其他未变更代码,风险收敛在 `src/main.go` 自身。

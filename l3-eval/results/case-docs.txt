@@ -1,0 +1,24 @@
+排查完成。以下是审查结论。
+
+## 审查结论:未发现问题
+
+### 排查过程
+
+**1. 确认变更性质**
+该 diff 仅新增一个根目录 `README.md`,内容是配套 golden 测试仓库 `ai-review-golden-tests` 的使用说明,属于纯文档变更。
+
+**2. 确认基线(未变更既有代码)为空,无影响面**
+- `l3-eval/run_claude_eval.py:53` 中 case-docs 的定义为 `"base": []`,即基线无任何文件;
+- 实测 `l3-eval/case-docs/src/` 为空目录(`find` 无任何文件),git 也不跟踪该目录;
+- 因此 README 不会与任何既有代码产生交互,不存在覆盖、路径冲突、构建/CI 配置被破坏的风险。
+
+**3. 交叉验证 README 引用的准确性**(README 中所有外部引用均指向配套仓库,本仓库沙箱无法直接访问,但均能通过本仓库内文档佐证):
+- **`scenarios/README.md`**:`docs/golden-testing.md` 第二节确认配套仓库含 `scenarios/` 目录(`scenarios/<case>/changes|fixed|expected.json`、`scenarios/manifest.json`),README 指引"参考场景结构"的路径合理;
+- **`.github/workflows/ai-review.yml` 与 `DEEPSEEK_API_KEY`**:与本仓库根 `README.md` 中 pr-review 接入配置完全一致(`${{ secrets.DEEPSEEK_API_KEY }}`)。作为被审查仓库,golden-tests 配套仓库要触发 AI review 就必须存在该 workflow 与对应 secret,引用成立;
+- README 中"按需创建场景分支,观察 pr-review 表现"的描述与 golden 测试的 Level 0 流程(建 `test/<case>` 分支 → 开 PR → 审查)一致。
+
+**4. 代码层面**
+README 不含代码、不含 yaml 配置、不改变 `pyproject.toml` 依赖,不引入任何功能性问题。
+
+### 备注(非问题)
+唯一无法从本仓库内完全闭环确认的是 `scenarios/README.md` 与 `.github/workflows/ai-review.yml` 两个文件在配套仓库的确切存在性(沙箱禁止越界访问)。但依据本仓库方法论文档,二者均为配套仓库的必要组成,引用无异常。如需百分百确认,可在 `~/WorkBuddy/ai-review-golden-tests` 内核对一遍这两个路径。

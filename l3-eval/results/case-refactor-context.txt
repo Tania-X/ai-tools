@@ -1,0 +1,39 @@
+审查完成。我通过 `list_dir`/`read_file`/`grep` 定位了基线目录并核对了所有 `getUserName`/`render` 的定义与调用点,确认了 diff 新增的 `src/user.go` 与既有未变更代码的交互。
+
+**核查事实:**
+- 基线未变更代码 `l3-eval/case-refactor-context/src/display.go:4-6` 中,`render` 注释明确"期望 getUserName 返回完整姓名",并在第 6 行调用 `getUserName(id)` 拼接 `"Hello, "`。
+- 仓库 `l3-eval/case-refactor-context/src/user.go` 已存在内容与本次 diff **完全一致**的文件。
+- 全仓 `getUserName` 调用点仅 `display.go:6` 一处;仓库根无 `src/` 目录、无 go.mod,`l3-eval/case-*/src/*.go` 均为 eval 上下文副本。
+
+---
+
+## 审查结论
+
+### error #1 — 忽略 `id` 参数,固定返回同一用户名
+- **位置**:`src/user.go:6`
+- **问题**:`getUserName(id string)` 声明接收 `id`,但函数体完全忽略它,对所有 id 一律返回 `"alice"`。按 id 查询/映射用户的语义未实现——不同 id 应得到不同的用户(至少应校验 id 或按 id 查找),这是潜在的正确性缺陷。
+- **修复建议**:按 `id` 实现用户查找/映射,或对未知 id 做错误处理;若确实不需要参数,应删除形参并同步更新所有调用方。
+
+### error #2 — 返回单名,破坏未变更调用方 `render` 的"完整姓名"契约(跨文件行为回归)
+- **位置**:`src/user.go:6`,影响 `l3-eval/case-refactor-context/src/display.go:4-6`
+- **问题**:既有未变更代码 `render` 的注释明确"期望 getUserName 返回完整姓名",`render` 用返回值拼接问候语 `"Hello, " + getUserName(id)`。新增实现只返回首名 `"alice"`,产出 `"Hello, alice"`,不满足完整姓名契约 → **未变更代码的输出发生回归**。这是典型的跨文件影响:diff 只新增了文件,却破坏了 diff 之外既有调用方对返回值的预期。
+- **修复建议**:确认既有 `render`/`display.go` 的调用契约,返回完整姓名(如 `"Alice Smith"`);并 grep 全仓 `getUserName` 的所有调用点逐一核对(当前仅 `display.go:6` 一处)。
+
+### warn #3 — `id` 形参完全未使用("死参数"),与注释矛盾
+- **位置**:`src/user.go:5`
+- **问题**:`id` 声明为形参但函数体未使用;同时第 4 行注释"根据 id 返回用户名"与实现(忽略 id)自相矛盾,死参数掩盖了上述忽略 id 的缺陷。
+- **修复建议**:使用 `id` 实现按用户查询,并修正注释;若该参数确属无用,删除形参并更新所有调用点。
+
+### info #4 — `package main` 目录内无 `func main`,无法编译为可执行程序
+- **位置**:`src/user.go:1-2`
+- **问题**:新增文件声明为 `package main`,但其所在目录(仓库根新建的 `src/`)只有这一个文件、没有 `func main`。Go 中 `package main` 必须包含 `main` 函数才能 `go build`/`go run` 通过,否则报 `function main is undeclared in the main package`——该目录是一个无法独立构建的孤包。
+- **修复建议**:若仅作库提供 `getUserName`,改用非 `main` 包名(如 `package user`);若要作为程序,补充 `func main()`。
+
+### info #5 — 与既有文件内容重复,且新增位置与既有调用方不在同一包
+- **位置**:`src/user.go` 整体;对比 `l3-eval/case-refactor-context/src/user.go`
+- **问题**:仓库 `l3-eval/case-refactor-context/src/` 下已存在内容完全一致的 `user.go`;本次在仓库根 `src/` 新建一份,造成重复代码。且既有调用方 `display.go` 位于 `l3-eval/case-refactor-context/src/`,与新增文件不在同一目录/包,新定义的 `getUserName` 对既有 `render` 并不可见——变更实际落在错误的层级,既引入重复,又未能服务于既有依赖(结合 #2,即使想要"修复" `getUserName` 行为,改到根目录也无效)。
+- **修复建议**:确认变更应落在哪个包/目录,避免在根目录新建同名重复文件;如需修改 `getUserName` 行为,应直接修改既有文件。
+
+---
+
+**排查过程**:`list_dir` 定位基线目录 → `read_file` 读 `display.go` 与 `user.go`(确认调用契约与既有定义)→ `grep` 全仓确认 `getUserName`/`render` 的全部定义与调用点(仅 `display.go:6` 一处)→ 确认仓库根无 `src/` 目录、无 `go.mod`、无其他 `main` 函数。核心结论:新增 `getUserName` 忽略 `id` 且返回单名,破坏未变更的 `render` 期望的完整姓名契约;另有死参数、注释矛盾、无 `main`、位置重复且落错包等次要问题。

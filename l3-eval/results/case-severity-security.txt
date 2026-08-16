@@ -1,0 +1,41 @@
+## 审查结论
+
+我先确认了影响面:基线 `l3-eval/case-severity-security/src/main.go` 与 diff 的 "before" 完全一致(磁盘上的基线未被修改);对 `deleteRole` / `clearPolicy` / `deleteRoleRecord` 全仓库 grep 无任何外部引用(无调用方、无测试),即该 diff 只影响这一个文件,不牵连其他未变更代码。以下是变更本身引入的问题:
+
+---
+
+### 问题 1 — `deleteRole` 丢弃 `clearPolicy` 的 error,存在安全后果
+- **位置**:`src/main.go:12`(变更后 `deleteRole` 内)
+- **严重度**:warn(因涉及权限/安全后果,边界上可视为 error)
+- **问题描述**:`clearPolicy` 声明返回 `error`,但在 `deleteRole` 中作为独立语句调用,返回值被静默丢弃。若策略清理失败,`deleteRoleRecord(id)`(第 11 行)已经删除了角色记录,权限策略却残留——留下"孤儿权限",即已删除角色对应的授权未被撤销(可能被同名重建角色继承,或成为越权残留)。这正是"静默忽略错误 + 安全后果"的场景。
+- **修复建议**:
+  ```go
+  func deleteRole(id int) error {
+      // 建议先撤销权限再删记录(revoke-then-delete),失败时可安全重试
+      if err := clearPolicy(id); err != nil {
+          return fmt.Errorf("clear policy for role %d: %w", id, err)
+      }
+      return deleteRoleRecord(id)
+  }
+  ```
+  至少也应记录错误:`if err := clearPolicy(id); err != nil { log.Printf("clear policy for role %d failed: %v", id, err) }`。
+
+---
+
+### 问题 2 — `clearPolicy` 为 stub,问题在运行时不可暴露
+- **位置**:`src/main.go:5-7`
+- **严重度**:info
+- **问题描述**:`clearPolicy` 当前恒返回 `nil`,使问题 1 的错误丢弃在基线运行时无法触发。一旦该函数被替换为真实实现(清理权限表/ACL,可能失败),缺陷立即显现,属于潜在缺陷。
+- **修复建议**:作为审查发现提示即可;结合问题 1 一并修复(处理返回的 error),并在真实实现落地前保证错误被传播或记录。
+
+---
+
+### 问题 3 — 移除 `main` 入口(低优先级提示)
+- **位置**:`src/main.go`(变更后文件整体)
+- **严重度**:info
+- **问题描述**:变更删除了 `package main` 的 `main()`、`User` 结构体及 `fmt` 导入。若该包被作为可执行程序编译,`go build` 会报 `function main is undeclared in the main package`。但经排查,仓库内无其它代码引用 `User`/旧 `main`,且该文件仅作为 l3-eval 的基线/变更源使用,移除应属场景脚手架的有意改动,不影响未变更代码。
+- **修复建议**:无需处理;若该包将来需要独立编译,需补回 `main` 入口或改为非 `main` 包。
+
+---
+
+**排查过程简述**:读取了基线 `src/main.go`(与 diff before 一致)→ 全仓库 grep `deleteRole|clearPolicy|deleteRoleRecord` 无匹配(确认无外部调用方/测试受影响)→ 查看 `run_claude_eval.py` 确认该 case 的注入方式(仅 `src/main.go` 单文件变更)。核心问题为问题 1(忽略权限清理错误,有安全后果),问题 2、3 为伴随提示。
