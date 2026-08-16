@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from gateway import ChatResponse, LLMClient
+from gateway.otel import get_tracer
 
 from .config import ReviewConfig
 from .diff import DiffHunk, FileDiff, parse_diff
@@ -149,8 +150,16 @@ class ReviewRunner:
 
     # ------------------------------------------------------------------ 入口
     def run(self) -> ReviewResult:
+        tracer = get_tracer()
+        with tracer.start_as_current_span("pr_review.run") as root_span:
+            return self._run_inner(root_span)
+
+    def _run_inner(self, root_span: Any) -> ReviewResult:
         pr = self.github.get_pr_info()
         raw_files = self.github.get_pr_files()
+        root_span.set_attribute("pr.number", pr.number)
+        root_span.set_attribute("pr.title", pr.title)
+        root_span.set_attribute("pr.files", len(raw_files))
 
         candidates: list[FileDiff] = []
         skipped = 0
@@ -264,6 +273,20 @@ class ReviewRunner:
         解析失败短路(2026-08-14 事故): 任一批次 JSON 解析失败 → 跳过质量门
         (不评估"失败产物", 防 judge 把空 issues 误判为 pass), 直接 degraded。
         """
+        tracer = get_tracer()
+        with tracer.start_as_current_span("review.quality_gate") as qspan:
+            result = self._quality_loop_inner(pr, batches, result, handled=handled)
+            qspan.set_attribute("gate.verdict", result.quality_verdict or "")
+            return result
+
+    def _quality_loop_inner(
+        self,
+        pr: PRInfo,
+        batches: list[list[FileDiff]],
+        result: ReviewResult,
+        *,
+        handled: list[tuple[str, int]] | None = None,
+    ) -> ReviewResult:
         from .quality import Judge
 
         if result.parse_errors:
@@ -376,6 +399,24 @@ class ReviewRunner:
         注意: LLMClient.chat 只返回文本不解析 JSON, 这里预检让重试真正生效
         (旧实现等 chat 抛 ValueError 是死代码, 2026-08-14 事故根因之一)。
         """
+        tracer = get_tracer()
+        with tracer.start_as_current_span("review.batch") as span:
+            span.set_attribute("batch.no", batch_no)
+            span.set_attribute("batch.total", batch_total)
+            span.set_attribute("batch.files", len(batch))
+            return self._review_batch_inner(
+                pr, batch, batch_no, batch_total, handled, feedback
+            )
+
+    def _review_batch_inner(
+        self,
+        pr: PRInfo,
+        batch: list[FileDiff],
+        batch_no: int,
+        batch_total: int,
+        handled: list[tuple[str, int]] | None,
+        feedback: list[str] | None,
+    ) -> ChatResponse:
         messages = build_messages(
             pr, batch, self.config, batch_no, batch_total,
             repo_context=self.context, handled=handled, feedback=feedback,
@@ -468,7 +509,11 @@ class ReviewRunner:
             for tc in resp.tool_calls:
                 try:
                     args = json.loads(tc.get("arguments") or "{}")
-                    result = repo_tools.execute(tc["name"], args)
+                    tracer = get_tracer()
+                    with tracer.start_as_current_span("repo_tools.execute") as tspan:
+                        tspan.set_attribute("tool.name", tc["name"])
+                        result = repo_tools.execute(tc["name"], args)
+                        tspan.set_attribute("tool.result_len", len(result))
                 except Exception as e:  # 兜底: 工具异常不中断审查
                     logger.warning("工具执行异常 %s: %s", tc.get("name"), e)
                     result = f"工具执行异常: {type(e).__name__}: {e}"

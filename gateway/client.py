@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from .config import GatewayConfig, ProviderConfig
+from .otel import get_tracer
 
 
 class LLMError(Exception):
@@ -78,22 +79,35 @@ class LLMClient:
             payload["response_format"] = response_format
         url = pc.base_url.rstrip("/") + "/chat/completions"
 
-        data, used_key = self._call_with_retry(pc, url, payload, timeout or pc.timeout)
+        # OTel 追踪: 每次 LLM 往返一个 span(OTEL_ENABLED=1 时生效, 默认 no-op 零开销)
+        tracer = get_tracer()
+        with tracer.start_as_current_span("llm.chat") as span:
+            span.set_attribute("llm.provider", pc.name)
+            span.set_attribute("llm.model", payload["model"])
+            span.set_attribute("llm.tools", bool(tools))
+            span.set_attribute("llm.response_format", bool(response_format))
 
-        msg = data["choices"][0]["message"]
-        content = msg.get("content", "") or ""
-        tool_calls = None
-        if msg.get("tool_calls"):
-            tool_calls = [
-                {
-                    "id": tc["id"],
-                    "name": tc["function"]["name"],
-                    "arguments": tc["function"].get("arguments", "{}"),
-                }
-                for tc in msg["tool_calls"]
-            ]
-        usage = data.get("usage", {})
-        cost = self._compute_cost(pc, usage)
+            data, used_key = self._call_with_retry(pc, url, payload, timeout or pc.timeout)
+
+            msg = data["choices"][0]["message"]
+            content = msg.get("content", "") or ""
+            tool_calls = None
+            if msg.get("tool_calls"):
+                tool_calls = [
+                    {
+                        "id": tc["id"],
+                        "name": tc["function"]["name"],
+                        "arguments": tc["function"].get("arguments", "{}"),
+                    }
+                    for tc in msg["tool_calls"]
+                ]
+            usage = data.get("usage", {})
+            cost = self._compute_cost(pc, usage)
+            span.set_attribute("llm.prompt_tokens", usage.get("prompt_tokens", 0))
+            span.set_attribute("llm.completion_tokens", usage.get("completion_tokens", 0))
+            span.set_attribute("llm.cost", cost)
+            span.set_attribute("llm.tool_calls", len(tool_calls) if tool_calls else 0)
+            span.set_attribute("llm.content_len", len(content))
         self.prompt_tokens += usage.get("prompt_tokens", 0)
         self.completion_tokens += usage.get("completion_tokens", 0)
         self.total_cost += cost
