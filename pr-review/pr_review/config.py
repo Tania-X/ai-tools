@@ -29,6 +29,8 @@ class QualityConfig:
     enabled: bool = True
     # judge 用模型(空=与审查同模型; 独立配置时传 model 覆盖)
     judge_model: str = ""
+    # judge 用 provider(空=与审查同 provider; 独立配置时传 provider 覆盖, 模型路由生产化)
+    judge_provider: str = ""
     # 低于该分触发重写; 太高重试爆炸, 太低失去门禁意义
     pass_score: int = 70
     # 重写硬上限, 防死循环; 耗尽后降级(说明评论 + check neutral)

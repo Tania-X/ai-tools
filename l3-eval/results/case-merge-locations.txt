@@ -1,0 +1,49 @@
+我已完成排查。先说明排查过程,再给结论。
+
+## 排查过程
+
+1. **基线确认**:`read_file` 读取 `l3-eval/case-merge-locations/src/main.go`(17 行),与 diff 的 `a/` 侧逐字一致——空 `main` 打印 `"golden test baseline"` + `User` 结构体,是无问题基线。
+2. **跨文件影响确认**:`list_dir` 显示 `case-merge-locations/src/` 下**只有 `main.go` 一个文件**;`grep` 全仓 `createRole|updateRole|batchCreateRoles` 无任何既有调用方,`grep` `displayName|label|RoleRequest` 在该目录无其他引用。且本仓库无 `go.mod`、无构建管线引用这些 eval 副本文件(与 `run_claude_eval.py` 的机制一致)。
+3. **结论**:改动不破坏任何未变更的既有代码,问题全部集中在改动后的文件自身。
+
+## 审查结论:发现问题(1 error + 1 warn + 1 info)
+
+### 1. 契约字段名不匹配:`label` 应为 `displayName`(同根因 3 处,合并为一条)—— **error**
+
+- **位置**:`src/main.go:13`、`src/main.go:18`、`src/main.go:24`
+- **问题**:改后代码自己注释声明的契约是 `RoleRequest { name, displayName }`(`src/main.go:5`),但三个调用点全部发送键 `"label"`:
+  - `createRole` → `{"name": name, "label": label}`(:13)
+  - `updateRole` → `{"name": name, "label": label}`(:18)
+  - `batchCreateRoles` → `{"name": it[0], "label": it[1]}`(:24)
+  
+  后端按契约解析 `displayName`,`label` 键要么被严格校验拒绝、要么被宽松地静默丢弃——**每次调用 displayName 都不会被正确送达**,这是必然触发的功能缺陷,不是假设路径。三个位置是同一根因(字段名与契约不符)在不同调用点的重复表现,合并为一条处理,不重复计。
+- **修复建议**:三处 map 的键统一改为 `"displayName"`,同时把参数名 `label` 改为 `displayName` 以对齐契约:
+  ```go
+  func (a *api) createRole(name, displayName string) {
+      post("/roles", map[string]string{"name": name, "displayName": displayName})
+  }
+  ```
+  `updateRole`、`batchCreateRoles` 同理。
+
+### 2. `package main` 失去 `func main`,文件无法编译 —— **warn**
+
+- **位置**:`src/main.go:2`
+- **问题**:diff 删除了基线唯一的 `func main()`(及不再使用的 `import "fmt"`),改后文件是 `package main` 却没有任何 `main` 函数。Go 中 `package main` 必须含 `func main` 才能 `go build`/`go run`,否则报 `function main is undeclared in the main package`。基线(带 `main()`)是可构建的,这是一处构建级回归;因本仓库无 `go.mod`、无构建管线引用该文件,故定级 warn(真实工程中会升 error)。
+- **修复建议**:若意图是"可运行示例",补回 `func main()`;若意图是供前端调用的封装库,应改库包名(如 `package role`)并将 `createRole` 等方法导出。
+
+### 3. `batchCreateRoles` 用 `[2]string` 位置元组,可读性差 —— **info**
+
+- **位置**:`src/main.go:22`
+- **问题**:`items [][2]string` 是匿名二元素元组,调用方无法从类型上区分 `[0]`/`[1]` 谁是 name、谁是 label,极易传反,且和其余函数的命名参数风格不一致。
+- **修复建议**:用具名结构体:
+  ```go
+  type RoleItem struct {
+      Name        string
+      DisplayName string
+  }
+  func (a *api) batchCreateRoles(items []RoleItem) { ... }
+  ```
+
+---
+
+**补充说明**:`updateRole` 注释与实现均为 `POST /roles/{name}`,方法语义内部一致,未构成问题;`name` 同时在路径与请求体中(契约本就含 `name` 字段),不额外计。整体来看,该 diff 的风险收敛在 `src/main.go` 自身,不波及未变更代码,核心必改项是第 1 条契约字段名不匹配(三处同根因,已合并)。

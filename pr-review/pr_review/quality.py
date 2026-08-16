@@ -59,6 +59,9 @@ class Judge:
         kwargs: dict[str, Any] = {"max_tokens": 400}
         if self.config.judge_model:
             kwargs["model"] = self.config.judge_model
+        # 模型路由: judge 可独立 provider(如便宜模型), 审查主流程用默认 provider
+        if self.config.judge_provider:
+            kwargs["provider"] = self.config.judge_provider
         resp = self.llm.chat(messages, **kwargs)
         return self._parse(resp.content)
 

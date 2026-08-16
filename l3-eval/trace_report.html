@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>审查链路 Trace 瀑布图</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; background: #fafaf8; margin: 0; padding: 24px; color: #2c2c2a; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #6b6a66; font-size: 12px; margin-bottom: 20px; }
+  .row { display: flex; align-items: center; margin: 2px 0; }
+  .label { width: 260px; font-size: 12px; padding-right: 12px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .track { position: relative; flex: 1; height: 22px; background: #f1efe8; border-radius: 4px; }
+  .bar { position: absolute; top: 3px; height: 16px; border-radius: 3px; opacity: 0.9; }
+  .dur { width: 90px; font-size: 11px; color: #6b6a66; padding-left: 8px; }
+  .legend { margin-top: 18px; font-size: 11px; color: #6b6a66; }
+  .legend span { display: inline-block; margin-right: 14px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+  .attrs { margin: 14px 0 0 272px; font-size: 11px; color: #555; background: #fff; border: 1px solid #e3e1da; border-radius: 6px; padding: 10px 14px; max-width: 720px; }
+  .attrs div { padding: 1px 0; }
+</style>
+</head>
+<body>
+<h1>审查链路 Trace</h1>
+<div class="sub">pr_review.run → review.batch → llm.chat / repo_tools.execute · 生成时间 2026-08-16 14:41:25</div>
+<div id="chart"></div>
+<div class="legend">
+  <span><span class="swatch" style="background:#185fa5"></span>llm.chat</span>
+  <span><span class="swatch" style="background:#0f6e56"></span>repo_tools.execute</span>
+  <span><span class="swatch" style="background:#854f0b"></span>review.batch</span>
+  <span><span class="swatch" style="background:#6b6a66"></span>pr_review.run</span>
+</div>
+<div class="attrs" id="attrs"></div>
+<script>
+const SPANS = [{"name": "llm.chat", "span_id": 3123420295562969155, "parent_id": 17533140774572838209, "start_ms": 1786862445659.0989, "end_ms": 1786862447828.4768, "duration_ms": 2169.4, "attributes": {"llm.provider": "deepseek", "llm.model": "deepseek-v4-flash", "llm.tools": "True", "llm.response_format": "False", "llm.prompt_tokens": "2774", "llm.completion_tokens": "230", "llm.cost": "0.0", "llm.tool_calls": "2", "llm.content_len": "0"}}, {"name": "repo_tools.execute", "span_id": 11320379640370541503, "parent_id": 17533140774572838209, "start_ms": 1786862447828.618, "end_ms": 1786862447828.886, "duration_ms": 0.3, "attributes": {"tool.name": "list_dir", "tool.result_len": "47"}}, {"name": "repo_tools.execute", "span_id": 14642196837122867435, "parent_id": 17533140774572838209, "start_ms": 1786862447828.916, "end_ms": 1786862447876.095, "duration_ms": 47.2, "attributes": {"tool.name": "grep", "tool.result_len": "2765"}}, {"name": "llm.chat", "span_id": 10660438567798863069, "parent_id": 17533140774572838209, "start_ms": 1786862447876.164, "end_ms": 1786862448958.525, "duration_ms": 1082.4, "attributes": {"llm.provider": "deepseek", "llm.model": "deepseek-v4-flash", "llm.tools": "True", "llm.response_format": "False", "llm.prompt_tokens": "4205", "llm.completion_tokens": "131", "llm.cost": "0.0", "llm.tool_calls": "2", "llm.content_len": "0"}}, {"name": "repo_tools.execute", "span_id": 12470353891279418899, "parent_id": 17533140774572838209, "start_ms": 1786862448958.635, "end_ms": 1786862448958.885, "duration_ms": 0.2, "attributes": {"tool.name": "read_file", "tool.result_len": "254"}}, {"name": "repo_tools.execute", "span_id": 11577283717834143894, "parent_id": 17533140774572838209, "start_ms": 1786862448958.914, "end_ms": 1786862448959.1528, "duration_ms": 0.2, "attributes": {"tool.name": "list_dir", "tool.result_len": "335"}}, {"name": "llm.chat", "span_id": 2809115184151322838, "parent_id": 17533140774572838209, "start_ms": 1786862448959.176, "end_ms": 1786862452011.9019, "duration_ms": 3052.7, "attributes": {"llm.provider": "deepseek", "llm.model": "deepseek-v4-flash", "llm.tools": "True", "llm.response_format": "False", "llm.prompt_tokens": "4544", "llm.completion_tokens": "354", "llm.cost": "0.0", "llm.tool_calls": "2", "llm.content_len": "0"}}, {"name": "repo_tools.execute", "span_id": 13122478305464731777, "parent_id": 17533140774572838209, "start_ms": 1786862452011.9648, "end_ms": 1786862452012.2822, "duration_ms": 0.3, "attributes": {"tool.name": "read_file", "tool.result_len": "6083"}}, {"name": "repo_tools.execute", "span_id": 6381906277316815642, "parent_id": 17533140774572838209, "start_ms": 1786862452012.3079, "end_ms": 1786862452012.448, "duration_ms": 0.1, "attributes": {"tool.name": "read_file", "tool.result_len": "2647"}}, {"name": "llm.chat", "span_id": 17580481538986870703, "parent_id": 17533140774572838209, "start_ms": 1786862452012.47, "end_ms": 1786862481936.863, "duration_ms": 29924.4, "attributes": {"llm.provider": "deepseek", "llm.model": "deepseek-v4-flash", "llm.tools": "True", "llm.response_format": "False", "llm.prompt_tokens": "8167", "llm.completion_tokens": "3406", "llm.cost": "0.0", "llm.tool_calls": "1", "llm.content_len": "0"}}, {"name": "repo_tools.execute", "span_id": 10599453961953079579, "parent_id": 17533140774572838209, "start_ms": 1786862481936.928, "end_ms": 1786862481937.545, "duration_ms": 0.6, "attributes": {"tool.name": "read_file", "tool.result_len": "181"}}, {"name": "llm.chat", "span_id": 7745601102923098675, "parent_id": 17533140774572838209, "start_ms": 1786862481937.5842, "end_ms": 1786862485919.833, "duration_ms": 3982.2, "attributes": {"llm.provider": "deepseek", "llm.model": "deepseek-v4-flash", "llm.tools": "True", "llm.response_format": "False", "llm.prompt_tokens": "11643", "llm.completion_tokens": "495", "llm.cost": "0.0", "llm.tool_calls": "0", "llm.content_len": "1133"}}, {"name": "review.batch", "span_id": 17533140774572838209, "parent_id": 10776556670821780715, "start_ms": 1786862445658.99, "end_ms": 1786862485919.966, "duration_ms": 40261.0, "attributes": {"batch.no": "1", "batch.total": "1", "batch.files": "1"}}, {"name": "pr_review.run", "span_id": 10776556670821780715, "parent_id": null, "start_ms": 1786862445657.494, "end_ms": 1786862485920.181, "duration_ms": 40262.7, "attributes": {"pr.number": "777", "pr.title": "otel demo", "pr.files": "1"}}];
+const COLORS = {"llm.chat": "#185fa5", "repo_tools.execute": "#0f6e56", "review.batch": "#854f0b", "pr_review.run": "#6b6a66"};
+// 树形整理
+const byId = {};
+SPANS.forEach(s => byId[s.span_id] = s);
+const root = SPANS.find(s => !s.parent_id);
+const t0 = root ? root.start_ms : Math.min(...SPANS.map(s => s.start_ms));
+const tEnd = Math.max(...SPANS.map(s => s.end_ms));
+const total = tEnd - t0;
+function childrenOf(id) { return SPANS.filter(s => s.parent_id === id); }
+// 按树序展开(深度优先)
+const ordered = [];
+(function walk(s, depth) { ordered.push({...s, depth}); childrenOf(s.span_id).forEach(c => walk(c, depth + 1)); })(root || {span_id: null}, 0);
+const chart = document.getElementById("chart");
+ordered.forEach(s => {
+  const row = document.createElement("div"); row.className = "row";
+  const label = document.createElement("div"); label.className = "label";
+  label.textContent = "  ".repeat(s.depth) + s.name;
+  const track = document.createElement("div"); track.className = "track";
+  const bar = document.createElement("div"); bar.className = "bar";
+  bar.style.left = ((s.start_ms - t0) / total * 100) + "%";
+  bar.style.width = Math.max((s.duration_ms / total * 100), 0.6) + "%";
+  bar.style.background = COLORS[s.name] || "#8a8a86";
+  bar.title = s.name + " " + s.duration_ms + "ms\n" + JSON.stringify(s.attributes);
+  track.appendChild(bar);
+  const dur = document.createElement("div"); dur.className = "dur"; dur.textContent = s.duration_ms + "ms";
+  row.appendChild(label); row.appendChild(track); row.appendChild(dur);
+  chart.appendChild(row);
+});
+// 属性面板(汇总关键信息)
+const attrsBox = document.getElementById("attrs");
+const summary = {};
+ordered.forEach(s => Object.entries(s.attributes).forEach(([k, v]) => {
+  summary[s.name + "." + k] = v;
+}));
+const lines = [
+  "pr.number=" + (summary["pr_review.run.pr.number"] || "?"),
+  "pr.files=" + (summary["pr_review.run.pr.files"] || "?"),
+  "LLM 往返=" + ordered.filter(s => s.name === "llm.chat").length,
+  "工具调用=" + ordered.filter(s => s.name === "repo_tools.execute").length,
+  "总耗时=" + Math.round(total) + "ms",
+];
+lines.forEach(l => { const d = document.createElement("div"); d.textContent = l; attrsBox.appendChild(d); });
+</script>
+</body>
+</html>
