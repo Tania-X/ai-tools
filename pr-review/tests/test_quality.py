@@ -90,6 +90,25 @@ def test_judge_passes_custom_model():
     assert llm.chat.call_args.kwargs["model"] == "deepseek-r1"  # 独立模型覆盖
 
 
+def test_judge_passes_custom_provider():
+    """模型路由: judge 独立 provider(审查用主 provider, judge 用便宜 provider)。"""
+    llm = MagicMock()
+    llm.chat.return_value = ChatResponse(
+        content='{"score": 90, "verdict": "pass", "reasons": []}',
+        model="m", provider="p", usage={},
+    )
+    judge = Judge(
+        llm=llm,
+        config=QualityConfig(judge_model="deepseek-v4-flash", judge_provider="kimi"),
+    )
+    result = ReviewResult()
+    result.issues = [_issue()]
+    jr = judge.evaluate(result, "diff")
+    assert jr.verdict == "pass"
+    assert llm.chat.call_args.kwargs["model"] == "deepseek-v4-flash"
+    assert llm.chat.call_args.kwargs["provider"] == "kimi"  # 独立 provider 路由
+
+
 # ---------------------------------------------------------------- 重写循环
 def _quality_runner(llm_side_effect):
     """构造带指定审查 LLM 的 runner(质量循环 mock judge)。"""

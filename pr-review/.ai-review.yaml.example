@@ -60,6 +60,7 @@ max_handled_lines: 200
 quality_gate:
   enabled: true          # 一键开关; 关闭则跳过 judge 与重写
   judge_model: ""        # judge 用模型; 留空=与审查同模型
+  judge_provider: ""     # judge 用 provider; 留空=与审查同 provider(模型路由: 审查用强模型, judge 可用便宜模型)
   pass_score: 70         # 低于则触发重写
   max_rewrites: 3        # 重写硬上限, 耗尽后降级
   max_judge_input_chars: 8000  # judge 输入预算(大 PR 截断)
