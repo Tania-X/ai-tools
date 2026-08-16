@@ -171,12 +171,13 @@ def test_format_comment_shows_quality_score():
     """质量门评分透明化: judge 打分后 pass 评论也显示评分。"""
     from pr_review.review import ReviewIssue, ReviewResult
 
+    runner, _, _ = _make_runner(files=[])
     result = ReviewResult()
     result.summaries = ["结构清晰"]
     result.issues = [ReviewIssue(file="a.go", line=1, severity="warn", title="t", detail="d", suggestion="s")]
     result.quality_score = 85.0
     result.quality_verdict = "pass"
-    comment = ReviewRunner.__new__(ReviewRunner).format_comment(result)
+    comment = runner.format_comment(result)
     assert "**质量评分**: 85/100" in comment
     assert "judge 判定: 通过" in comment
 
