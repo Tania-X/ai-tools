@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit, urlunsplit
 
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
@@ -67,6 +68,10 @@ def setup_tracing(span_exporter=None) -> None:
         if endpoint:
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
+            # 兼容裸端口写法: 新版 SDK 把 endpoint 当完整 URL, 不会自动补 /v1/traces
+            parts = urlsplit(endpoint)
+            if not parts.path:
+                endpoint = urlunsplit((parts.scheme, parts.netloc, "/v1/traces", "", ""))
             headers = parse_kv_list(os.environ.get("OTEL_EXPORTER_OTLP_HEADERS"))
             exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers or None)
         else:

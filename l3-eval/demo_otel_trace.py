@@ -135,11 +135,20 @@ lines.forEach(l => {{ const d = document.createElement("div"); d.textContent = l
 
 
 def main() -> None:
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    # 上报模式: 设了 OTEL_EXPORTER_OTLP_ENDPOINT → 走 OTLP(远程 Jaeger/云平台);
+    # 否则内存 exporter → 生成本地可视化 HTML
+    otlp_mode = bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
+    if otlp_mode:
+        from gateway.otel import setup_tracing as _setup
 
-    reset_tracing()
-    exporter = InMemorySpanExporter()
-    setup_tracing(span_exporter=exporter)
+        _setup()
+        spans: list[dict] = []
+    else:
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        reset_tracing()
+        exporter = InMemorySpanExporter()
+        setup_tracing(span_exporter=exporter)
 
     cfg = GatewayConfig(
         providers={
@@ -171,6 +180,10 @@ def main() -> None:
         repo_root=str(ROOT),
     )
     result = runner.run()
+
+    if otlp_mode:
+        print(f"审查完成: issues={len(result.issues)} token={result.total_tokens} | 已上报 OTLP: {os.environ['OTEL_EXPORTER_OTLP_ENDPOINT']}")
+        return
 
     spans = [span_to_dict(s) for s in exporter.get_finished_spans()]
     html = HTML_TEMPLATE.format(
