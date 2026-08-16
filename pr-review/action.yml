@@ -21,6 +21,22 @@ inputs:
     description: ".ai-review.yaml 路径(相对仓库根)"
     required: false
     default: ".ai-review.yaml"
+  otel-enabled:
+    description: "启用 OpenTelemetry 上报(1/0), 默认 0"
+    required: false
+    default: "0"
+  otel-endpoint:
+    description: "OTLP 端点, 如 http://47.98.234.129:4318(带认证的端点配 otel-headers)"
+    required: false
+    default: ""
+  otel-service-name:
+    description: "服务名(平台 UI 区分应用), 默认 ai-tools-review"
+    required: false
+    default: "ai-tools-review"
+  otel-headers:
+    description: "OTLP 鉴权 header, 如 Authorization=Basic dXNlcjpwYXNz(配合认证网关)"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -45,4 +61,8 @@ runs:
         AI_GATEWAY_BASE_URL: ${{ inputs.base-url }}
         AI_GATEWAY_MODEL: ${{ inputs.model }}
         AI_REVIEW_CONFIG: ${{ inputs.config-path }}
+        OTEL_ENABLED: ${{ inputs.otel-enabled }}
+        OTEL_EXPORTER_OTLP_ENDPOINT: ${{ inputs.otel-endpoint }}
+        OTEL_SERVICE_NAME: ${{ inputs.otel-service-name }}
+        OTEL_EXPORTER_OTLP_HEADERS: ${{ inputs.otel-headers }}
       run: python "${{ github.action_path }}/pr_review/main.py"
