@@ -44,8 +44,15 @@ docs/           设计/评测方案/taste 沉淀/双引擎对比报告/OTel 文�
 | 项 | 成果 | 验证 |
 |----|------|------|
 | MCP 封装 | repo_tools 4 工具 → 标准 MCP(stdio) | Claude Code 实测调用 + 双引擎对比 9/9 |
-| OTel 追踪 | 审查链路 5 环节 span 树 | 可视化瀑布图 + span 树单测 |
+| OTel 追踪 | 审查链路 5 环节 span 树, **正式接入远程 Jaeger**(每次 ai-review 自动留痕) | 可视化瀑布图 + span 树单测 + PR#12 审查 trace 实测 |
 | 模型路由 + 评测 CI | judge 独立 provider; golden 评测自动化 | judge 路由单测; golden-eval workflow |
+
+### 可观测性落地(正式服务)
+
+- **Jaeger 部署于远程服务器**(badger 持久化 + Caddy basic auth 认证), 每次 PR 审查自动上报 trace
+  —— LLM 往返 / 工具调用 / 质量门判定全部留痕;
+- 上报方式: action 配置 `otel-enabled / otel-endpoint / otel-service-name / otel-headers` 四个参数;
+- 部署 / 迁移 / 运维: [ops/jaeger/README.md](ops/jaeger/README.md)(一键部署 `deploy.sh`、数据迁移 `migrate.sh`)
 
 ## 快速开始(接入任意仓库)
 
