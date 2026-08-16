@@ -7,10 +7,13 @@
     │     └── repo_tools.execute(工具调用: 工具名/结果大小/耗时)
     └── review.quality_gate(judge 打分/重写)
 
-导出:
+导出(全部走标准 OTLP 环境变量, 兼容各云厂商):
 - 默认 console exporter(打印 trace 到 stdout, 演示/本地排查)
-- 设置 OTEL_EXPORTER_OTLP_ENDPOINT 后改用 OTLP(接 Jaeger/Collector)
-- 设置 OTEL_ENABLED=1 启用(默认关闭, 不影响现有运行)
+- OTEL_EXPORTER_OTLP_ENDPOINT 设置 → OTLP 上报(接 Jaeger/Collector/云厂商)
+- OTEL_EXPORTER_OTLP_HEADERS → 鉴权 header(阿里云 ARMS: Authentication=token)
+- OTEL_RESOURCE_ATTRIBUTES → resource 属性(腾讯云 TCOP: token=xxx,host.name=xxx; 以及 service.name)
+- OTEL_SERVICE_NAME → 服务名(云平台 UI 上区分应用)
+- OTEL_ENABLED=1 启用(默认关闭, 不影响现有运行)
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 import os
 
 from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor
 
@@ -25,17 +29,37 @@ _tracer: trace.Tracer | None = None
 _setup_done = False
 
 
+def parse_kv_list(raw: str | None) -> dict[str, str]:
+    """解析 'k1=v1,k2=v2' 形式的环境变量为 dict(OTLP 标准格式)。"""
+    result: dict[str, str] = {}
+    if not raw:
+        return result
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        result[k.strip()] = v.strip()
+    return result
+
+
 def setup_tracing(span_exporter=None) -> None:
     """配置 TracerProvider 与 exporter(幂等)。
 
-    span_exporter 注入(测试用); 默认 console; OTLP 端点存在则用 OTLP。
+    span_exporter 注入(测试用); 默认 console; OTLP 端点存在则用 OTLP(带 headers/resource)。
     """
     global _setup_done, _tracer
     if _setup_done:
         return
     _setup_done = True
 
-    provider = TracerProvider()
+    # resource 属性(腾讯云 token / service.name 等)
+    attrs = parse_kv_list(os.environ.get("OTEL_RESOURCE_ATTRIBUTES"))
+    service_name = os.environ.get("OTEL_SERVICE_NAME")
+    if service_name:
+        attrs.setdefault("service.name", service_name)
+    provider = TracerProvider(resource=Resource.create(attrs)) if attrs else TracerProvider()
+
     if span_exporter is not None:
         exporter = span_exporter
     else:
@@ -43,7 +67,8 @@ def setup_tracing(span_exporter=None) -> None:
         if endpoint:
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-            exporter = OTLPSpanExporter(endpoint=endpoint)
+            headers = parse_kv_list(os.environ.get("OTEL_EXPORTER_OTLP_HEADERS"))
+            exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers or None)
         else:
             exporter = ConsoleSpanExporter()
     if span_exporter is not None:
