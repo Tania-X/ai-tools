@@ -1,21 +1,53 @@
-# ai-tools — AI × DevOps 工具集
+# ai-tools — agentic 代码审查引擎(自建 CodeRabbit 替代)
 
-独立的 AI 能力层仓库,服务包括 [devops-dashboard](https://gitee.com/Max_1996/devops-dashboard) 在内的项目。
+> **自建 AI 代码审查引擎**: 量化评测闭环 + agentic 工具调用 + 生产化三件套(MCP / OTel / 模型路由)。
+> 已在 devops-dashboard 真实 PR 落地验证, 同一评测集双引擎对比 9/9 对齐 Claude Code。
 
-## 模块
+---
 
-| 模块 | 说明 | 状态 |
-|------|------|------|
-| `gateway` | LLM 统一网关(DeepSeek/Kimi/OpenAI 兼容,多 key 轮询/重试/成本统计) | ✅ 骨架完成 |
-| `pr-review` | GitHub Action AI PR 审查(自建 CodeRabbit 替代) | ✅ 可用(已合并 main,接入 devops-dashboard) |
-| `alert-explain` | 告警解读/根因建议 | 规划 |
-| `log-analyzer` | 异常日志分析 | 规划 |
-| `ops-query` | 自然语言查询指标/状态 | 规划 |
-| `mcp-server` | 统一暴露给 AI 助手(MCP) | 规划 |
+## 亮点(为什么值得看)
 
-## 快速开始(pr-review)
+1. **量化评测闭环** —— 不是拍脑袋调 prompt: 9 个人造场景 + 真实 PR 回放集, 精确率/召回率思维,
+   Level 0/1 全绿, 同一套评测集可评测**第三方 agent**(双引擎对比)。
+2. **agentic 工具调用** —— 函数调用 + 4 工具(read_file/grep/ast_grep/list_dir) + 多轮 tool loop,
+   自动收敛 + 硬上限; 对照 CodeRabbit 的取舍(函数调用 vs bash)有调研有落地。
+3. **生产化三件套** —— ①审查工具封装为标准 **MCP server**(Claude Code/Codex 可直接调用);
+   ②**OpenTelemetry** 全链路追踪(LLM 往返/工具调用/质量门可见); ③**模型路由**(审查强模型/judge 便宜模型)
+   + golden 评测跑在 CI。
+4. **真实落地** —— devops-dashboard PR#7/8(DDD 重构)跑通: AI 主动查代码确认重构一致性,
+   零误报; 四次失败模式的工程化收敛(跑偏/空输出/工具超限/文本工具调用)。
 
-在任意仓库配置一个 workflow,监听 `pull_request` 事件:
+## 架构
+
+```
+gateway/        多 provider LLM 网关(DeepSeek/Kimi/OpenAI 兼容, 多 key 轮询/重试/成本统计/OTel 埋点)
+pr-review/      GitHub Action 审查引擎
+  ├─ pr_review/    diff 解析 → agentic 审查(工具循环) → 质量门(judge+重写) → 评论/门禁
+  ├─ mcp_server.py  仓库工具集封装为标准 MCP(stdio, Claude Code 可调用)
+  └─ tests/        单测 + OTel span 树验证
+golden-tests/   量化评测驱动器(9 场景 + 真实 PR 回放, Level 0/1)
+l3-eval/        双引擎对比评测(Claude Code + MCP vs 自研) + OTel 可视化
+docs/           设计/评测方案/taste 沉淀/双引擎对比报告/OTel 文档
+```
+
+## 评测成绩
+
+**Level 0(9/9 全绿)**: 正样本全命中(case-bug/security/convention/merge-locations/severity-security/refactor-context),
+负样本零误报(case-clean/docs), 边界正确(case-bait 不报 error)。
+
+**双引擎对比(9/9 对齐)**: 同一场景集, Claude Code + 我们的 MCP(零策略注入)与自研引擎(带完整策略)审查质量一致,
+且严重度判断**自发**符合我们沉淀的策略(必然触发→error, 假设路径→warn)。
+→ 详见 [docs/l3-dual-engine-eval.md](docs/l3-dual-engine-eval.md)
+
+## 生产化三件套
+
+| 项 | 成果 | 验证 |
+|----|------|------|
+| MCP 封装 | repo_tools 4 工具 → 标准 MCP(stdio) | Claude Code 实测调用 + 双引擎对比 9/9 |
+| OTel 追踪 | 审查链路 5 环节 span 树 | 可视化瀑布图 + span 树单测 |
+| 模型路由 + 评测 CI | judge 独立 provider; golden 评测自动化 | judge 路由单测; golden-eval workflow |
+
+## 快速开始(接入任意仓库)
 
 ```yaml
 # .github/workflows/ai-review.yml
@@ -32,60 +64,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Tania-X/ai-tools/pr-review@main
-        with:
-          api-key: ${{ secrets.DEEPSEEK_API_KEY }}
-          model: deepseek-chat
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 ```
 
-首次使用:
+## 文档索引
 
-1. 仓库根放 `.ai-review.yaml`(可复制 [pr-review/.ai-review.yaml.example](pr-review/.ai-review.yaml.example))
-2. 配置一个 OpenAI 兼容 API key 的 Secret
-3. 打开 PR 即可看到审查结果:
-   - **整体评论**: summary + 问题清单 + token/成本统计
-   - **行内评论线程**: 每个可定位的问题挂在 diff 对应行上, 可直接在行上回复讨论
-   - **check-run 门禁**: 存在达到 `fail_on_severity`(默认 error)级别的问题时 PR 变红,
-     配合分支保护规则可阻止合并; AI 不确定(needs_review)的问题不计入门禁
+- [审查引擎设计](docs/ai-review-architecture.md) · [质量门设计](docs/pr-review-quality-gate.md) · [评测方案](docs/golden-testing.md)
+- [双引擎对比报告](docs/l3-dual-engine-eval.md) · [OTel 可观测性](docs/otel-tracing.md)
+- [taste 沉淀(审查品味工程化)](docs/taste-engineering.md)
 
-## 接入其他仓库(Checklist)
+## 为什么这么做(面试叙事)
 
-以 devops-dashboard 为参考,给任意 GitHub 仓库接入的完整步骤:
-
-1. **workflow 文件必须合入 main** — `pull_request` 事件读取 base 分支(main)的 workflow 定义,文件不在 main 上不会触发
-2. `.github/workflows/ai-review.yml` 内容(注意 `permissions.pull-requests: write` 是发评论必需的):
-
-   ```yaml
-   name: AI Review
-   on:
-     pull_request:
-       branches: [main]
-       types: [opened, synchronize]
-   permissions:
-     contents: read
-     pull-requests: write
-   jobs:
-     ai-review:
-       runs-on: ubuntu-latest
-       steps:
-         - uses: actions/checkout@v4
-         - uses: Tania-X/ai-tools/pr-review@main
-           with:
-             api-key: ${{ secrets.DEEPSEEK_API_KEY }}
-   ```
-
-3. 仓库 Settings → Secrets and variables → Actions 添加 `DEEPSEEK_API_KEY`(或改成自己的 secret 名)
-4. 仓库根放 `.ai-review.yaml` 控制噪音(`min_severity` 默认 warn,嫌吵调 error)
-
-> 提示: 若开发流是 Gitee/其他平台 + GitHub 镜像, 只需把带 workflow 的 main 同步到 GitHub 镜像即可,
-> 审查只发生在 GitHub 侧, 源平台无需任何改动。
-
-## 文档
-
-- [设计文档](docs/design.md) — 架构、模块规划、技术选型、学习路径
-- [pr-review 使用指南](docs/pr-review.md) — 实现原理、前提条件、手动配置流程、配置项参考
-- [P1 质量门禁方案](docs/pr-review-quality-gate.md) — LLM-as-judge 打分 + 自检重写(规划,未实现)
-- [P2 描述自动补全方案](docs/pr-review-desc-autofill.md) — 创建 PR 后 AI 自动生成 title/description(规划,未实现)
-- [质量闭环路线图(P1/P2 合并)](docs/pr-review-evolution.md) — 线程决议驱动 + 质量门 + desc 补全统一设计(规划,未实现)
-- [ci-diagnose 使用指南](docs/ci-diagnose.md) — CI 失败自动诊断: 分析日志评论到 PR(根因+定位+修复建议)
-- [Golden 测试方案](docs/golden-testing.md) — 已知答案场景量化验证审查质量(精确率/召回率)
-- [ai-review 架构演进](docs/ai-review-architecture.md) — 企业级演进蓝图: 引擎去 GitHub 化 / MCP 上下文 / 模型路由 / CLI+Skills(规划)
+> 从"自建 CodeRabbit 替代"出发, 一路做到: 量化评测闭环(9 场景 + 真实 PR 回放) →
+> agentic 工具调用(对照 CodeRabbit 取舍) → 工具封装 MCP 与主流 agent 互操作(双引擎对比 9/9) →
+> 生产化(OTel 可观测 + 模型路由 + 评测 CI)。每一步都有证据, 不是功能堆砌。
