@@ -661,6 +661,16 @@ class ReviewRunner:
             header,
             "",
         ]
+        # 质量门评分透明化: judge 打过分就显示(pass 也显示, 不只降级)
+        if result.quality_score is not None:
+            verdict_txt = {"pass": "通过", "rewrite": "重写后通过", "degraded": "降级"}.get(
+                result.quality_verdict or "", ""
+            )
+            lines.append(
+                f"**质量评分**: {result.quality_score:.0f}/100"
+                + (f"(judge 判定: {verdict_txt})" if verdict_txt else "(judge 自动判定)")
+            )
+            lines.append("")
         if result.summaries:
             lines.append("**整体判断**:")
             for s in result.summaries:
