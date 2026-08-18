@@ -16,9 +16,8 @@ def test_parse_comment_issues_counts_by_severity():
         "1. **`c.go`:3** — 忽略错误\n"
     )
     actual = parse_comment_issues(body)
-    assert actual["error"] == 2
-    assert actual["warn"] == 1
-    assert actual["info"] == 0
+    assert actual["4"] == 2   # Error → 4
+    assert actual["2"] == 1   # Warn → 2
     assert actual["total"] == 3
     assert actual["no_issues"] is False
 
@@ -41,11 +40,11 @@ def test_parse_comment_issues_from_meta_block():
         "### 🔴 Error (1)\n"
         "1. **`a.go`:21** — nil 解引用\n"
         "<!--AI-REVIEW-META\n"
-        '{"version":1,"issues":[{"file":"a.go","line":21,"severity":"error","category":"bug","title":"nil 解引用"}]}\n'
+        '{"version":1,"issues":[{"file":"a.go","line":21,"severity":4,"category":"bug","title":"nil 解引用"}]}\n'
         "-->"
     )
     actual = parse_comment_issues(body)
-    assert actual["error"] == 1
+    assert actual["4"] == 1   # severity error → 4
     assert actual["total"] == 1
     assert actual["categories"] == ["bug"]
 
@@ -54,7 +53,7 @@ def test_parse_comment_issues_fallback_no_categories():
     # 旧评论(无锚点): 正则计数, categories 为 None(未知)
     body = "## 🤖 AI 代码审查\n### 🔴 Error (2)\n1. **`a.go`:1** — x"
     actual = parse_comment_issues(body)
-    assert actual["error"] == 2
+    assert actual["4"] == 2   # Error → 4
     assert actual["categories"] is None
 
 
@@ -70,23 +69,23 @@ def test_find_ai_review_comment():
 
 # ---------------------------------------------------------------- evaluate
 def test_evaluate_pass_when_issues_in_range():
-    expected = {"expect": {"min_issues": 1, "severities": ["error"], "quality_pass": True}}
-    actual = {"error": 1, "warn": 0, "info": 0, "total": 1}
+    expected = {"expect": {"min_issues": 1, "severities": [4, 5], "quality_pass": True}}
+    actual = {"4": 1, "total": 1}
     result = evaluate("case-bug", expected, actual, "failure")
     assert result["pass"] is True
 
 
 def test_evaluate_fail_on_too_few_issues():
     expected = {"expect": {"min_issues": 1}}
-    result = evaluate("case-bug", expected, {"total": 0, "error": 0, "warn": 0, "info": 0}, "success")
+    result = evaluate("case-bug", expected, {"total": 0}, "success")
     assert result["pass"] is False
     assert any("min_issues" in f for f in result["failures"])
 
 
 def test_evaluate_fail_on_wrong_severity():
     # 期望至少命中 error, 却只报出 warn(漏报 error)
-    expected = {"expect": {"severities": ["error"]}}
-    actual = {"error": 0, "warn": 1, "info": 0, "total": 1}
+    expected = {"expect": {"severities": [4, 5]}}
+    actual = {"2": 1, "total": 1}
     result = evaluate("case-bug", expected, actual, "success")
     assert result["pass"] is False
     assert any("未命中" in f for f in result["failures"])
@@ -94,8 +93,8 @@ def test_evaluate_fail_on_wrong_severity():
 
 def test_evaluate_pass_when_error_hit_with_noise_warn():
     # 核心缺陷命中(error) + 额外 warn 噪音, 不应误判 fail(本次修复的核心场景)
-    expected = {"expect": {"min_issues": 1, "severities": ["error"], "quality_pass": True}}
-    actual = {"error": 1, "warn": 3, "info": 0, "total": 4}
+    expected = {"expect": {"min_issues": 1, "severities": [4, 5], "quality_pass": True}}
+    actual = {"4": 1, "2": 3, "total": 4}
     result = evaluate("case-bug", expected, actual, "failure")
     assert result["pass"] is True
     assert result["failures"] == []
@@ -103,8 +102,8 @@ def test_evaluate_pass_when_error_hit_with_noise_warn():
 
 def test_evaluate_forbid_severity():
     # 边界样本: 禁止报 error, 报出 error 即 fail
-    expected = {"expect": {"forbid_severities": ["error"], "quality_pass": True}}
-    actual_error = {"error": 1, "warn": 0, "info": 0, "total": 1}
+    expected = {"expect": {"forbid_severities": [4, 5], "quality_pass": True}}
+    actual_error = {"4": 1, "total": 1}
     assert evaluate("case-bait", expected, actual_error, "failure")["pass"] is False
 
     # 报 warn/info 可接受
@@ -130,14 +129,14 @@ def test_evaluate_max_issues_zero():
 
 
 def test_evaluate_category_hit():
-    expected = {"expect": {"min_issues": 1, "severities": ["error"], "categories": ["security"]}}
-    actual = {"error": 1, "warn": 0, "info": 0, "total": 1, "categories": ["security"]}
+    expected = {"expect": {"min_issues": 1, "severities": [4, 5], "categories": ["security"]}}
+    actual = {"4": 1, "total": 1, "categories": ["security"]}
     assert evaluate("case-security", expected, actual, "failure")["pass"] is True
 
 
 def test_evaluate_category_miss():
     # 报对级别但类别不符(如把 SQL 注入报成 bug 而非 security)
-    expected = {"expect": {"severities": ["error"], "categories": ["security"]}}
+    expected = {"expect": {"severities": [4, 5], "categories": ["security"]}}
     actual = {"error": 1, "warn": 0, "info": 0, "total": 1, "categories": ["bug"]}
     result = evaluate("case-security", expected, actual, "failure")
     assert result["pass"] is False

@@ -13,7 +13,7 @@ from pr_review.quality import (
 from pr_review.review import ReviewIssue, ReviewResult, ReviewRunner
 
 
-def _issue(file="a.py", line=1, severity="warn", title="t"):
+def _issue(file="a.py", line=1, severity=2, title="t"):
     return ReviewIssue(
         file=file, line=line, severity=severity,
         title=title, detail="d", suggestion="s",
@@ -48,12 +48,12 @@ def test_structural_signals_catches_hallucination():
         _issue(file="a.py", line=1),
         _issue(file="a.py", line=999),          # 不在新增行
         _issue(file="b.py", line=0),            # 行号缺失
-        ReviewIssue(file="c.py", line=2, severity="fatal", title="非法级别", detail="", suggestion=""),
+        ReviewIssue(file="c.py", line=2, severity=99, title="越界级别", detail="", suggestion=""),
     ]
     signals = structural_signals(issues, {"a.py": {1, 2}})
     assert any("999" in s for s in signals)        # 幻觉
     assert any("行号缺失" in s for s in signals)
-    assert any("severity 非法" in s for s in signals)
+    assert any("severity 越界" in s for s in signals)
     assert not any("a.py:1" in s for s in signals)  # 正常 issue 无信号
 
 
@@ -217,7 +217,7 @@ def test_quality_loop_rewrite_replaces_issues():
 def test_format_degraded_comment_includes_summary():
     runner, _, _ = _quality_runner([])
     result = ReviewResult(model="deepseek-chat", review_no=3)
-    result.issues = [_issue(file="a.py", line=1, severity="error", title="真问题")]
+    result.issues = [_issue(file="a.py", line=1, severity=4, title="真问题")]
     result.quality_score = 45.0
     result.quality_reasons = ["误报多"]
     comment = runner.format_degraded_comment(result)

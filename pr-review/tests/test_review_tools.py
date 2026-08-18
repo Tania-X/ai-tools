@@ -80,7 +80,7 @@ def test_tool_loop_executes_tool_and_returns(tmp_path):
     assert "foo" in tool_msg["content"]  # grep 结果
     # 结果正常
     assert len(result.issues) == 1
-    assert result.issues[0].severity == "warn"
+    assert result.issues[0].severity == 2
 
 
 def test_tool_loop_passes_tools_schema_when_repo_available(tmp_path):

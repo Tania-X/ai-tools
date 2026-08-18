@@ -25,7 +25,57 @@ from .repo_tools import TOOL_SCHEMAS, RepoTools
 
 logger = logging.getLogger("pr_review")
 
-SEVERITY_ICONS = {"error": "🔴", "warn": "🟡", "info": "🔵"}
+# 严重级别 1-5 数字体系(2026-08-18): 1建议 2轻微 3必修 4严重 5致命(绿→红)
+SEVERITY_META: dict[int, dict[str, str]] = {
+    1: {"icon": "🟢", "name": "建议"},
+    2: {"icon": "🟩", "name": "轻微"},
+    3: {"icon": "🟡", "name": "必修"},
+    4: {"icon": "🟠", "name": "严重"},
+    5: {"icon": "🔴", "name": "致命"},
+}
+# 旧字符串 → 数字(兼容迁移/测试)
+_LEGACY_SEVERITY = {"info": 1, "warn": 2, "error": 4}
+
+
+def severity_from_facts(trigger: str, impact: str) -> int:
+    """两轴事实 → 1-5 数字(确定性映射, 2026-08-18 设计)。
+
+    trigger: real / hypothetical / style; impact: fatal / functional / minor / none
+    - style → 1
+    - hypothetical → 2(不强制修; 无论后果——8/15 策略: 假设性一律低判)
+    - real + fatal → 5; real + functional → 4; real + minor → 3; real + none → 2
+    """
+    t = (trigger or "").strip().lower()
+    i = (impact or "").strip().lower()
+    if t == "style":
+        return 1
+    if t == "hypothetical":
+        return 2
+    if t == "real":
+        if i == "fatal":
+            return 5
+        if i == "functional":
+            return 4
+        if i == "minor":
+            return 3
+        return 2
+    return 2  # 未知 trigger 按假设性低判
+
+
+def _clamp_severity(value: Any, default: int = 2) -> int:
+    """severity 解析: 数字(1-5)或旧字符串(info/warn/error), 越界/非法回退默认。"""
+    if isinstance(value, int):
+        return value if 1 <= value <= 5 else default
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in _LEGACY_SEVERITY:
+            return _LEGACY_SEVERITY[v]
+        try:
+            n = int(v)
+            return n if 1 <= n <= 5 else default
+        except ValueError:
+            return default
+    return default
 
 
 class ToolLoopError(RuntimeError):
@@ -45,7 +95,7 @@ _GENERATED_MARKERS = (
 class ReviewIssue:
     file: str
     line: int
-    severity: str
+    severity: int  # 1-5(1建议 2轻微 3必修 4严重 5致命), 由两轴事实映射
     title: str
     detail: str
     suggestion: str
@@ -66,10 +116,15 @@ class ReviewIssue:
             ln = int(loc.get("line", 0) or 0)
             if f and ln > 0:
                 locations.append({"file": f, "line": ln})
+        # severity 解析优先级: trigger/impact 两轴事实(新格式) > severity 数字/旧字符串(兼容)
+        if "trigger" in d or "impact" in d:
+            severity = severity_from_facts(str(d.get("trigger", "")), str(d.get("impact", "")))
+        else:
+            severity = _clamp_severity(d.get("severity", 2))
         return cls(
             file=file,
             line=line,
-            severity=str(d.get("severity", "info")).lower(),
+            severity=severity,
             title=str(d.get("title", "")),
             detail=str(d.get("detail", "")),
             suggestion=str(d.get("suggestion", "")),
@@ -118,9 +173,9 @@ class ReviewResult:
         return bool(self.issues)
 
     @property
-    def severity_counts(self) -> dict[str, int]:
-        """各严重级别问题数量,供 check-run 门禁判定。"""
-        counts: dict[str, int] = {"error": 0, "warn": 0, "info": 0}
+    def severity_counts(self) -> dict[int, int]:
+        """各严重级别(1-5)问题数量,供 check-run 门禁判定。"""
+        counts: dict[int, int] = {}
         for issue in self.issues:
             counts[issue.severity] = counts.get(issue.severity, 0) + 1
         return counts
@@ -219,11 +274,8 @@ class ReviewRunner:
         if self.config.quality_gate.enabled:
             result = self._quality_loop(pr, batches, result, handled=handled)
 
-        # 排序: severity 降序(error > warn > info)优先, 同级别按 file+line
-        priority = {"error": 2, "warn": 1, "info": 0}
-        result.issues.sort(
-            key=lambda i: (-priority.get(i.severity, 0), i.file, i.line)
-        )
+        # 排序: severity 降序(数字大优先, 5致命→1建议), 同级别按 file+line
+        result.issues.sort(key=lambda i: (-i.severity, i.file, i.line))
         return result
 
     # ------------------------------------------------------------------ 批次执行
@@ -636,7 +688,7 @@ class ReviewRunner:
 
         extra_locations: 同一问题的其他位置, 用自然语言标注("同问题还出现在: ...")。
         """
-        icon = SEVERITY_ICONS.get(issue.severity, "🔵")
+        icon = SEVERITY_META.get(issue.severity, SEVERITY_META[2])["icon"]
         parts: list[str] = [f"{icon} **{issue.title}**"]
         if issue.needs_review:
             parts.append("> ⚠️ 需人工确认(设计意图类判断)")
@@ -677,15 +729,16 @@ class ReviewRunner:
                 lines.append(f"- {s.strip()}")
             lines.append("")
 
-        by_severity: dict[str, list[ReviewIssue]] = {}
+        by_severity: dict[int, list[ReviewIssue]] = {}
         for issue in result.issues:
             by_severity.setdefault(issue.severity, []).append(issue)
 
-        for sev in ("error", "warn", "info"):
+        for sev in range(5, 0, -1):  # 5致命 → 1建议
             items = by_severity.get(sev, [])
             if not items:
                 continue
-            lines.append(f"### {SEVERITY_ICONS[sev]} {sev.capitalize()} ({len(items)})")
+            meta = SEVERITY_META[sev]
+            lines.append(f"### {meta['icon']} [{sev}] {meta['name']} ({len(items)})")
             for idx, i in enumerate(items, start=1):
                 locs = i.all_locations()
                 if len(locs) > 1:

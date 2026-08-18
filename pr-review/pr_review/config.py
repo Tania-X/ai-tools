@@ -14,8 +14,30 @@ try:  # PyYAML 是 pr-review 唯一新增运行时依赖
 except ImportError:  # pragma: no cover - 依赖缺失时给出可读错误
     yaml = None  # type: ignore[assignment]
 
-# 严重级别从高到低
+# 严重级别从高到低(旧字符串, 兼容迁移/测试)
 SEVERITIES = ("error", "warn", "info")
+# 旧字符串 → 1-5 数字(2026-08-18 数字分级: 1建议 2轻微 3必修 4严重 5致命)
+LEGACY_SEVERITY_MAP = {"info": 1, "warn": 2, "error": 4}
+
+
+def _parse_severity(value, default: int, *, allow_off: bool = False) -> int:
+    """severity 配置解析: 支持 1-5 数字与旧字符串(error/warn/info/off)。"""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value if 1 <= value <= 5 else default
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in LEGACY_SEVERITY_MAP:
+            return LEGACY_SEVERITY_MAP[v]
+        if allow_off and v == "off":
+            return 0
+        try:
+            n = int(v)
+            return n if 1 <= n <= 5 else default
+        except ValueError:
+            return default
+    return default
 
 
 @dataclass
@@ -86,11 +108,14 @@ class ReviewConfig:
             "**/.vscode/**",
         ]
     )
-    # 只发出达到该级别及以上的问题(error > warn > info)
-    min_severity: str = "warn"
-    # 合并门禁:存在达到该级别及以上的问题时, check-run 失败 + job exit 1(PR 变红)
-    #   error: 只有 error 拦(推荐) | warn: warn 也拦 | off: 永不拦(只发评论)
-    fail_on_severity: str = "error"
+    # 只发出达到该级别及以上的问题(1-5 数字, 1建议~5致命; 兼容旧字符串 error→4/warn→2/info→1)
+    min_severity: int = 2
+    # 合并门禁(阻塞线): 存在达到该级别及以上的问题时, check-run 失败 + job exit 1(PR 变红)
+    #   4 = 严重及以上拦(推荐) | 3 = 必修也拦(激进) | 0 = 永不拦(只发评论)
+    fail_on_severity: int = 4
+    # 必修线: 达到该级别及以上的问题标记"必修"(2026-08-18 设计: 基线 2.5 语义 =
+    #   只有有真实触发路径/约定违反的 ≥3 级强制修, 假设性 2 级仅提醒)
+    require_fix_severity: int = 3
     # 切片:每批最多文件数(大 PR 分批审,控制单次 prompt token)
     max_files_per_batch: int = 20
     # 单文件 patch 超过该行数则截断(在评论中提示)
@@ -127,14 +152,12 @@ class ReviewConfig:
     review_tools: ReviewToolsConfig = field(default_factory=ReviewToolsConfig)
 
     def severity_rank(self, severity: str) -> int:
-        s = (severity or "info").strip().lower()
-        if s not in SEVERITIES:
-            return 0  # 未知级别按最低处理
-        return SEVERITIES.index(s)
+        """兼容旧调用: 字符串级别 → 数字(2026-08-18 后主逻辑直接用 int)。"""
+        return _parse_severity(severity, 2)
 
-    def passes_filter(self, severity: str) -> bool:
-        """是否达到 min_severity 门槛。"""
-        return self.severity_rank(severity) <= self.severity_rank(self.min_severity)
+    def passes_filter(self, severity: int) -> bool:
+        """是否达到 min_severity 门槛(数字比较, 1-5)。"""
+        return severity >= self.min_severity
 
     def should_ignore(self, path: str) -> bool:
         from fnmatch import fnmatch
@@ -173,10 +196,12 @@ def load_config(path: str | Path | None = None) -> ReviewConfig:
     ignore = data.get("ignore_paths")
     if ignore:
         cfg.ignore_paths = list(ignore)
-    if data.get("min_severity") in SEVERITIES:
-        cfg.min_severity = data["min_severity"]
-    if data.get("fail_on_severity") in SEVERITIES + ("off",):
-        cfg.fail_on_severity = data["fail_on_severity"]
+    # severity 配置: 支持数字(1-5)与旧字符串(error/warn/info/off)兼容
+    cfg.min_severity = _parse_severity(data.get("min_severity"), cfg.min_severity)
+    cfg.fail_on_severity = _parse_severity(data.get("fail_on_severity"), cfg.fail_on_severity, allow_off=True)
+    cfg.require_fix_severity = _parse_severity(
+        data.get("require_fix_severity"), cfg.require_fix_severity
+    )
     cfg.max_files_per_batch = int(data.get("max_files_per_batch", cfg.max_files_per_batch))
     cfg.max_lines_per_file = int(data.get("max_lines_per_file", cfg.max_lines_per_file))
     cfg.show_stats = bool(data.get("show_stats", cfg.show_stats))

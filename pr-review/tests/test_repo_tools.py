@@ -67,7 +67,7 @@ def test_grep_finds_reference(repo):
 def test_grep_scoped_to_path(repo):
     tools = RepoTools(repo)
     out = tools.grep("main", path="src")
-    assert "src/main.go:1: package main" in out
+    assert "main.go:1: package main" in out.replace("\\", "/")
 
 
 def test_grep_invalid_regex(repo):

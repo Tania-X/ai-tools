@@ -84,7 +84,7 @@ def structural_signals(
 ) -> list[str]:
     """零成本结构校验,产出 judge 参考信号(不直接否决 LLM 输出)。
 
-    校验项: 行号缺失 / 行号不在 diff 新增行(疑似幻觉) / severity 非法。
+    校验项: 行号缺失 / 行号不在 diff 新增行(疑似幻觉) / severity 越界(1-5)。
     """
     signals: list[str] = []
     for issue in issues:
@@ -92,9 +92,9 @@ def structural_signals(
             signals.append(f"{issue.file}: 行号缺失(无法定位到 diff 行)")
         elif added_lines.get(issue.file) and issue.line not in added_lines[issue.file]:
             signals.append(f"{issue.file}:{issue.line} 不在 diff 新增行(疑似幻觉)")
-    bad = [i.file for i in issues if i.severity not in SEVERITIES]
+    bad = [i.file for i in issues if not (1 <= i.severity <= 5)]
     if bad:
-        signals.append(f"{len(bad)} 条 issue severity 非法: {set(bad)}")
+        signals.append(f"{len(bad)} 条 issue severity 越界(应 1-5): {set(bad)}")
     return signals
 
 

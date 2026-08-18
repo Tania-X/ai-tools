@@ -28,14 +28,14 @@ def _format(issues: list[ReviewIssue]) -> str:
 
 def test_format_comment_roundtrip_counts_and_categories():
     body = _format([
-        ReviewIssue(file="src/main.go", line=21, severity="error", title="nil 解引用", detail="", suggestion="", category="bug"),
-        ReviewIssue(file="src/main.go", line=12, severity="warn", title="并发读写", detail="", suggestion="", category="resource"),
-        ReviewIssue(file="src/main.go", line=14, severity="info", title="缺注释", detail="", suggestion="", category="convention"),
+        ReviewIssue(file="src/main.go", line=21, severity=4, title="nil 解引用", detail="", suggestion="", category="bug"),
+        ReviewIssue(file="src/main.go", line=12, severity=2, title="并发读写", detail="", suggestion="", category="resource"),
+        ReviewIssue(file="src/main.go", line=14, severity=1, title="缺注释", detail="", suggestion="", category="convention"),
     ])
     parsed = parse_comment_issues(body)
-    assert parsed["error"] == 1
-    assert parsed["warn"] == 1
-    assert parsed["info"] == 1
+    assert parsed["4"] == 1
+    assert parsed["2"] == 1
+    assert parsed["1"] == 1
     assert parsed["total"] == 3
     assert set(parsed["categories"]) == {"bug", "resource", "convention"}
 

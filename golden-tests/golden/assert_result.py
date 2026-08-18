@@ -29,20 +29,20 @@ def evaluate(
         failures.append(f"issues 数 {total} > max_issues {max_issues}")
 
     # 必须命中的级别(至少报出期望集合中的某个级别)——正样本语义:
-    # 例 case-bug 期望 ["error"], 报出 error + 若干 warn 仍 pass(噪音不误杀)
+    # 例 case-bug 期望 [4,5](数字分级 2026-08-18), 报出 4/5 + 若干 2 仍 pass(噪音不误杀)
     required_sev = expect.get("severities") or []
     if required_sev:
-        reported = {sev for sev in ("error", "warn", "info") if int(actual.get(sev, 0)) > 0}
+        reported = _reported_levels(actual)
         if not (reported & set(required_sev)):
             failures.append(
                 f"未命中期望级别 {required_sev}(实际报出 {sorted(reported) or '无'})"
             )
 
     # 禁止报出的级别——边界样本语义:
-    # 例 case-bait 禁止 ["error"], 报 warn/info 可接受, 报 error = 严重度误判
+    # 例 case-bait 禁止 [4,5], 报 2/3 可接受, 报 4/5 = 严重度误判
     forbid_sev = expect.get("forbid_severities") or []
     for sev in forbid_sev:
-        if int(actual.get(sev, 0)) > 0:
+        if int(actual.get(str(sev), 0)) > 0:
             failures.append(f"报出被禁止的 {sev} 级问题(严重度误判)")
 
     # 必须命中的类别(至少报出期望集合中的某个类别)——正样本语义:
@@ -67,3 +67,18 @@ def evaluate(
         "actual": actual,
         "check_conclusion": check_conclusion,
     }
+
+
+# 旧评论(回退正则)级别映射: error→4, warn→2, info→1
+_LEGACY_SEV = {"error": 4, "warn": 2, "info": 1}
+
+
+def _reported_levels(actual: dict[str, Any]) -> set[int]:
+    """从 parse_comment_issues 结果提取报出的级别集合(1-5), 兼容旧 key。"""
+    reported: set[int] = set()
+    for sev, count in actual.items():
+        if sev in ("1", "2", "3", "4", "5") and int(count) > 0:
+            reported.add(int(sev))
+        elif sev in _LEGACY_SEV and int(count) > 0:
+            reported.add(_LEGACY_SEV[sev])
+    return reported

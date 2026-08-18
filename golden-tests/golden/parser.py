@@ -15,7 +15,7 @@ import json
 import re
 
 # severity 分组标题: "### 🔴 Error (2)"
-_SEVERITY_HEADER = re.compile(r"^###\s+\S+\s+(Error|Warn|Info)\s+\((\d+)\)", re.MULTILINE)
+_SEVERITY_HEADER = re.compile(r"^###\s+\S+\s+(?:\[\d\]\s+)?(Error|Warn|Info|建议|轻微|必修|严重|致命)\s+\((\d+)\)", re.MULTILINE)
 # 机器可读锚点(pr-review format_comment 输出的 HTML 注释, 契约化的可靠解析入口)
 _META_BLOCK = re.compile(r"<!--AI-REVIEW-META\s*\n(.*?)\n-->", re.DOTALL)
 # 无问题标记
@@ -28,11 +28,11 @@ def parse_comment_issues(body: str) -> dict[str, int | bool | list | None]:
     优先解析机器锚点(AI-REVIEW-META, 含 category); 无锚点(旧评论)时
     回退到正文正则计数(此时无法拿到类别, categories=None)。
 
-    返回: {"error": n, "warn": n, "info": n, "total": n, "no_issues": bool,
-           "categories": [str] | None}
+    返回: {"1".."5": n(数字分级 2026-08-18), "total": n, "no_issues": bool,
+           "categories": [str] | None}; 旧评论回退时 key 为 error/warn/info
     """
     result: dict[str, int | bool | list | None] = {
-        "error": 0, "warn": 0, "info": 0, "total": 0, "no_issues": False, "categories": None,
+        "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "total": 0, "no_issues": False, "categories": None,
     }
     if not body:
         return result
@@ -45,8 +45,9 @@ def parse_comment_issues(body: str) -> dict[str, int | bool | list | None]:
             issues = meta.get("issues") or []
             cats: list[str] = []
             for it in issues:
-                sev = str(it.get("severity", "info")).lower()
-                result[sev] = int(result[sev]) + 1  # type: ignore[operator]
+                sev = int(it.get("severity", 2) or 2)
+                key = str(sev) if 1 <= sev <= 5 else "2"
+                result[key] = int(result[key]) + 1  # type: ignore[operator]
                 result["total"] = int(result["total"]) + 1  # type: ignore[operator]
                 cat = it.get("category")
                 if cat:
@@ -57,11 +58,13 @@ def parse_comment_issues(body: str) -> dict[str, int | bool | list | None]:
         except (json.JSONDecodeError, AttributeError, TypeError):
             pass  # 锚点损坏, 回退到正文正则
 
-    # 回退: 正文正则计数(旧评论, 无类别信息)
+    # 回退: 正文正则计数(旧评论/无锚点, 无类别信息)
+    # 级别名 → 数字: Error→4, Warn→2, Info→1, 建议→1, 轻微→2, 必修→3, 严重→4, 致命→5
+    _NAME_SEV = {"error": 4, "warn": 2, "info": 1, "建议": 1, "轻微": 2, "必修": 3, "严重": 4, "致命": 5}
     if NO_ISSUES_MARK in body:
         result["no_issues"] = True
     for sev, count in _SEVERITY_HEADER.findall(body):
-        key = sev.lower()
+        key = str(_NAME_SEV.get(sev.lower(), 2))
         result[key] = int(result[key]) + int(count)  # type: ignore[operator]
         result["total"] = int(result["total"]) + int(count)  # type: ignore[operator]
     return result

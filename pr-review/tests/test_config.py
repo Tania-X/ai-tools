@@ -2,12 +2,12 @@
 
 import pytest
 
-from pr_review.config import DEFAULT_CONFIG, SEVERITIES, load_config
+from pr_review.config import DEFAULT_CONFIG, load_config
 
 
 def test_default_config_sane():
     cfg = DEFAULT_CONFIG
-    assert cfg.min_severity in SEVERITIES
+    assert 1 <= cfg.min_severity <= 5
     assert cfg.max_files_per_batch > 0
     assert len(cfg.review_focus) > 0
     assert "**/vendor/**" in cfg.ignore_paths
@@ -24,9 +24,9 @@ def test_should_ignore_glob():
 
 def test_severity_filter():
     cfg = DEFAULT_CONFIG
-    assert cfg.passes_filter("error")
-    assert cfg.passes_filter("warn")
-    assert not cfg.passes_filter("info")
+    assert cfg.passes_filter(4)
+    assert cfg.passes_filter(2)
+    assert not cfg.passes_filter(1)
 
 
 def test_load_config_missing_file_returns_default(tmp_path):
@@ -41,7 +41,7 @@ def test_load_config_from_yaml(tmp_path):
         encoding="utf-8",
     )
     cfg = load_config(f)
-    assert cfg.min_severity == "error"
+    assert cfg.min_severity == 4
     assert cfg.max_files_per_batch == 5
     assert cfg.review_focus == ["只关心安全问题"]
 
@@ -56,7 +56,7 @@ def test_load_config_v2_fields(tmp_path):
         encoding="utf-8",
     )
     cfg = load_config(f)
-    assert cfg.fail_on_severity == "warn"
+    assert cfg.fail_on_severity == 2
     assert cfg.context_files == ["AGENTS.md", "spec/**"]
     assert cfg.max_context_chars == 4000
     assert cfg.ignore_generated is False

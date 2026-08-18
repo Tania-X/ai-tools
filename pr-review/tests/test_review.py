@@ -75,7 +75,7 @@ def test_run_extracts_issues():
     issue = result.issues[0]
     assert issue.file == "src/auth.py"
     assert issue.line == 11
-    assert issue.severity == "warn"
+    assert issue.severity == 2
     assert result.batches == 1
     assert result.total_cost == 0.001
     # run() 只收集,不发评论(发评论在 main 入口)
@@ -137,7 +137,7 @@ def test_run_empty_candidates_no_review():
 
 
 def test_run_filters_below_min_severity():
-    cfg = ReviewConfig(min_severity="error", quality_gate=QualityConfig(enabled=False))
+    cfg = ReviewConfig(min_severity=4, quality_gate=QualityConfig(enabled=False))
     responses = [
         '{"summary": "s", "issues": ['
         '{"file": "a.py", "line": 1, "severity": "warn", "title": "小问题", "detail": "d", "suggestion": "s"},'
@@ -174,7 +174,7 @@ def test_format_comment_shows_quality_score():
     runner, _, _ = _make_runner(files=[])
     result = ReviewResult()
     result.summaries = ["结构清晰"]
-    result.issues = [ReviewIssue(file="a.go", line=1, severity="warn", title="t", detail="d", suggestion="s")]
+    result.issues = [ReviewIssue(file="a.go", line=1, severity=2, title="t", detail="d", suggestion="s")]
     result.quality_score = 85.0
     result.quality_verdict = "pass"
     comment = runner.format_comment(result)
@@ -188,9 +188,9 @@ def test_format_comment_numbers_within_each_severity():
 
     result = ReviewResult(model="deepseek-chat")
     result.issues = [
-        ReviewIssue(file="a.py", line=1, severity="error", title="错误1", detail="", suggestion=""),
-        ReviewIssue(file="b.py", line=2, severity="error", title="错误2", detail="", suggestion=""),
-        ReviewIssue(file="c.py", line=3, severity="warn", title="警告1", detail="", suggestion=""),
+        ReviewIssue(file="a.py", line=1, severity=4, title="错误1", detail="", suggestion=""),
+        ReviewIssue(file="b.py", line=2, severity=4, title="错误2", detail="", suggestion=""),
+        ReviewIssue(file="c.py", line=3, severity=2, title="警告1", detail="", suggestion=""),
     ]
     runner, _, _ = _make_runner(files=[])
     comment = runner.format_comment(result)
@@ -200,20 +200,20 @@ def test_format_comment_numbers_within_each_severity():
 
 
 def test_issues_sorted_severity_desc():
-    """LLM 返回乱序 severity, run 后按 error > warn > info 排序。"""
+    """LLM 返回乱序 severity, run 后按 5致命 > 1建议 排序。"""
     content = (
         '{"summary": "s", "issues": ['
-        '{"file": "w.py", "line": 1, "severity": "warn", "title": "w", "detail": "", "suggestion": ""},'
-        '{"file": "e.py", "line": 1, "severity": "error", "title": "e", "detail": "", "suggestion": ""},'
-        '{"file": "i.py", "line": 1, "severity": "info", "title": "i", "detail": "", "suggestion": ""}'
+        '{"file": "w.py", "line": 1, "severity": 2, "title": "w", "detail": "", "suggestion": ""},'
+        '{"file": "e.py", "line": 1, "severity": 4, "title": "e", "detail": "", "suggestion": ""},'
+        '{"file": "i.py", "line": 1, "severity": 1, "title": "i", "detail": "", "suggestion": ""}'
         "]}"
     )
     runner, _, _ = _make_runner(
         llm_responses=[content],
-        config=ReviewConfig(min_severity="info", quality_gate=QualityConfig(enabled=False)),
+        config=ReviewConfig(min_severity=1, quality_gate=QualityConfig(enabled=False)),
     )
     result = runner.run()
-    assert [i.severity for i in result.issues] == ["error", "warn", "info"]
+    assert [i.severity for i in result.issues] == [4, 2, 1]
 
 
 def test_format_comment_no_issues_fallback_evaluation():
@@ -245,7 +245,7 @@ def test_format_comment_sections_and_stats():
     runner, _, _ = _make_runner(config=cfg)
     result = runner.run()
     comment = runner.format_comment(result)
-    assert "### 🟡 Warn (1)" in comment
+    assert "### 🟩 [2] 轻微 (1)" in comment
     assert "模型: deepseek-chat" in comment
     assert "成本" in comment
 
@@ -272,12 +272,28 @@ def test_truncate_oversized_file():
 def test_review_issue_from_dict_defaults():
     issue = ReviewIssue.from_dict({"file": "x.py", "title": "t"})
     assert issue.line == 0
-    assert issue.severity == "info"
+    assert issue.severity == 2  # 缺省按轻微(假设性)处理
     assert issue.detail == ""
     # v2 新字段默认值
     assert issue.category == "other"
     assert issue.evidence == ""
     assert issue.needs_review is False
+
+
+def test_issue_from_dict_trigger_impact_mapping():
+    """两轴事实 → 数字映射(2026-08-18 核心)。"""
+    cases = [
+        ({"trigger": "style"}, 1),
+        ({"trigger": "hypothetical"}, 2),
+        ({"trigger": "real", "impact": "fatal"}, 5),
+        ({"trigger": "real", "impact": "functional"}, 4),
+        ({"trigger": "real", "impact": "minor"}, 3),
+        ({"trigger": "real", "impact": "none"}, 2),
+        ({"trigger": "hypothetical", "impact": "fatal"}, 2),  # 假设性最高 2
+    ]
+    for d, expected in cases:
+        issue = ReviewIssue.from_dict({"file": "x.py", "line": 1, "title": "t", **d})
+        assert issue.severity == expected, f"{d} → {issue.severity}, 期望 {expected}"
 
 
 # ---------------------------------------------------------------- v2: 新字段/生成代码/上下文
@@ -300,7 +316,7 @@ def test_format_comment_shows_evidence_and_review_flag():
     result = ReviewResult(model="deepseek-chat")
     result.issues = [
         ReviewIssue(
-            file="a.py", line=1, severity="error", title="类型不一致",
+            file="a.py", line=1, severity=4, title="类型不一致",
             detail="d", suggestion="s",
             category="type_consistency", evidence="spec 中 string vs enum", needs_review=True,
         )
@@ -427,7 +443,7 @@ def test_inline_body_includes_evidence_and_review_flag():
     result = ReviewResult()
     result.issues = [
         ReviewIssue(
-            file="a.py", line=1, severity="error", title="类型不一致", detail="d",
+            file="a.py", line=1, severity=4, title="类型不一致", detail="d",
             suggestion="s", evidence="spec 中 string vs enum", needs_review=True,
         )
     ]
@@ -435,7 +451,7 @@ def test_inline_body_includes_evidence_and_review_flag():
     body = runner._inline_body(result.issues[0])
     assert "需人工确认" in body
     assert "spec 中 string vs enum" in body
-    assert "🔴" in body
+    assert "🟠" in body
 
 
 # ---------------------------------------------------------------- 评审次数显示
