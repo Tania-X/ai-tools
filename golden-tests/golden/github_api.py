@@ -26,6 +26,26 @@ class GitHubAPI:
     def create_pr(self, base: str, head: str, title: str) -> dict:
         return self._post(f"/repos/{self.repo}/pulls", {"base": base, "head": head, "title": title})
 
+    def create_pr_or_reuse(self, base: str, head: str, title: str) -> dict:
+        """创建 PR; 若 head 已有 open PR(崩溃循环残留)则关闭后重建(2026-08-18 422 根因)。"""
+        try:
+            return self.create_pr(base, head, title)
+        except RuntimeError as e:
+            if "already exists" not in str(e):
+                raise
+            existing = self._find_open_pr(head)
+            if existing:
+                self.close_pr(existing["number"])
+            return self.create_pr(base, head, title)
+
+    def _find_open_pr(self, head: str) -> dict | None:
+        prs = self._get(f"/repos/{self.repo}/pulls", params={"state": "open", "head": f"{self.repo.split('/')[0]}:{head}", "per_page": 10})
+        return prs[0] if prs else None
+
+    def delete_branch(self, branch: str) -> dict:
+        """API 删分支(不依赖 git 凭据; git push --delete 在沙箱拦凭据写时会残留)。"""
+        return self._delete(f"/repos/{self.repo}/git/refs/heads/{branch}")
+
     def close_pr(self, pr_number: int) -> dict:
         return self._patch(f"/repos/{self.repo}/pulls/{pr_number}", {"state": "closed"})
 
@@ -79,6 +99,9 @@ class GitHubAPI:
 
     def _put(self, path: str, payload: dict) -> Any:
         return self._retry(lambda: self._client.put(path, json=payload), path)
+
+    def _delete(self, path: str) -> Any:
+        return self._retry(lambda: self._client.delete(path), path)
 
     def _retry(self, fn, path: str) -> Any:
         last_err: Exception | None = None

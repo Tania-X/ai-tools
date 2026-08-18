@@ -70,7 +70,8 @@ class GoldenRunner:
             self.git.commit(f"test: {name}")
             self.git.push(branch)
 
-            pr = self.api.create_pr("main", branch, f"test: {name}")
+            # 容错: 残留 PR(崩溃循环残留)存在时先关闭再建(2026-08-18 回归 422 根因)
+            pr = self.api.create_pr_or_reuse("main", branch, f"test: {name}")
             pr_number = pr["number"]
             sha = pr["head"]["sha"]
 
@@ -94,12 +95,16 @@ class GoldenRunner:
                     result["pass"] = False
                     result["failures"].append(f"修复后仍未放行(check={conclusion2})")
         finally:
-            # 清理(无论成功失败): 关 PR + 删分支
+            # 清理(无论成功失败): 关 PR + 删分支。
+            # 分支删除走 API(不依赖 git 凭据, 沙箱拦写凭据时 git push --delete 会失败残留)
             try:
                 self.api.close_pr(pr_number)
             except Exception:
                 pass
-            self.git.delete_remote_branch(branch)
+            try:
+                self.api.delete_branch(branch)
+            except Exception as e:
+                print(f"  [warn] API 删分支 {branch} 失败: {e}")
             self.git.checkout_and_cleanup(branch)
 
         return result
