@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from .assert_result import evaluate
 from .github_api import GitHubAPI
 from .gitops import GitOps
@@ -48,7 +50,13 @@ class GoldenRunner:
                 print(f"[skip] {name} 已有结果, 跳过(断点续跑)")
                 continue
             print(f"\n=== 运行 case: {name} (category={entry.get('category')}, level={self.level}) ===")
-            result = self._run_case(name, entry)
+            try:
+                result = self._run_case(name, entry)
+            except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectError, httpx.HTTPError) as e:
+                # API 网络重试耗尽: skip 而非崩进程(2026-08-18 回归崩溃根因之一)
+                # skip 场景可用 --resume 补跑
+                print(f"  [skip] {name} 网络失败: {type(e).__name__}")
+                result = {"case": name, "status": "skip", "reason": f"网络失败: {type(e).__name__}"}
             results.append(result)
             self._save_result(name, result)
 
