@@ -62,6 +62,37 @@ def test_structural_signals_clean():
     assert structural_signals(issues, {"a.py": {1}}) == []
 
 
+def test_structural_signals_catches_severity_overgrade():
+    """2026-08-19 P1: 证据是假设性故障但级别 ≥4(会拦合并) → 疑似高判信号。"""
+    issues = [
+        _issue(file="a.py", line=1),  # 正常
+        ReviewIssue(
+            file="b.py", line=3, severity=4, title="策略清理失败",
+            detail="若 RemoveFilteredPolicy 失败, 权限可能残留",
+            suggestion="", evidence="第 350 行, 失败时无回滚",
+        ),
+        ReviewIssue(  # 高严重度但证据是确定性的 → 不应出信号
+            file="c.py", line=5, severity=5, title="nil 解引用",
+            detail="user 为 nil, 直接访问 .Name 必然 panic",
+            suggestion="", evidence="第 21 行必有 nil",
+        ),
+    ]
+    signals = structural_signals(issues, {"a.py": {1}, "b.py": {3}, "c.py": {5}})
+    hits = [s for s in signals if "疑似严重度高判" in s]
+    assert len(hits) == 1, f"应只有 b.py 高判, 实际 {signals}"
+    assert "b.py:3" in hits[0]
+    # 确定性证据的 5 级不误报
+    assert not any("c.py" in s for s in signals)
+
+
+def test_judge_rubric_has_severity_match():
+    """judge rubric 含严重度与证据匹配维度(2026-08-19 P1)。"""
+    from pr_review.quality import JUDGE_SYSTEM_PROMPT
+
+    assert "严重度与证据匹配" in JUDGE_SYSTEM_PROMPT
+    assert "高判" in JUDGE_SYSTEM_PROMPT
+
+
 # ---------------------------------------------------------------- judge messages
 def test_build_judge_messages_structure():
     result = ReviewResult()

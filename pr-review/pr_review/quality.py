@@ -21,6 +21,8 @@ JUDGE_SYSTEM_PROMPT = """你是代码审查质量评估员,对 AI 审查产出�
 - 可操作性: 修改建议是否具体可执行(是否有明确改动方向/代码示意)
 - 覆盖度: 关键改动是否被审到(漏报)— 对照 diff 中的核心变更
 - 噪音: 是否过度挑剔无关紧要的问题
+- 严重度与证据匹配(2026-08-19 P1): issue 的 trigger/impact 判断是否与 evidence 一致。
+  证据是假设性故障("若 X 失败则…")却判 high/real → 严重度高判(最贵的误报, 会误拦合并), 必须扣分。
 
 评分规则:
 - 若 issues 为空数组:
@@ -84,7 +86,8 @@ def structural_signals(
 ) -> list[str]:
     """零成本结构校验,产出 judge 参考信号(不直接否决 LLM 输出)。
 
-    校验项: 行号缺失 / 行号不在 diff 新增行(疑似幻觉) / severity 越界(1-5)。
+    校验项: 行号缺失 / 行号不在 diff 新增行(疑似幻觉) / severity 越界(1-5) /
+    严重度高判(2026-08-19 P1: 证据是假设性故障但级别 ≥4)。
     """
     signals: list[str] = []
     for issue in issues:
@@ -92,10 +95,25 @@ def structural_signals(
             signals.append(f"{issue.file}: 行号缺失(无法定位到 diff 行)")
         elif added_lines.get(issue.file) and issue.line not in added_lines[issue.file]:
             signals.append(f"{issue.file}:{issue.line} 不在 diff 新增行(疑似幻觉)")
+        # 严重度高判: 假设性故障证据 + 高级别(≥4 会拦合并, 最贵的误报)
+        if issue.severity >= 4 and _looks_hypothetical(issue):
+            signals.append(
+                f"{issue.file}:{issue.line} 疑似严重度高判: 证据/描述是假设性故障"
+                f"(若…失败/可能/如果), 但级别为 {issue.severity}(≥4 会拦合并)"
+            )
     bad = [i.file for i in issues if not (1 <= i.severity <= 5)]
     if bad:
         signals.append(f"{len(bad)} 条 issue severity 越界(应 1-5): {set(bad)}")
     return signals
+
+
+_HYPOTHETICAL_MARKERS = ("若", "如果", "可能", "一旦", "假设", "失败时", "异常时", "hypothetical")
+
+
+def _looks_hypothetical(issue: Any) -> bool:
+    """issue 的描述/依据是否呈假设性(高判风险信号, 供 judge 复核)。"""
+    hay = f"{issue.detail} {issue.evidence} {issue.suggestion}"
+    return any(m in hay for m in _HYPOTHETICAL_MARKERS)
 
 
 def build_judge_messages(
