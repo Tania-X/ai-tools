@@ -339,3 +339,124 @@ def test_judge_prompt_has_empty_issues_rule():
     system = build_judge_messages(result, "diff", [], cfg)[0]["content"]
     assert "issues 为空数组" in system
     assert "正确审查" in system
+
+
+# ---------------------------------------------------------------- 逐条验证层(2026-08-20 改造)
+def test_per_issue_verify_keeps_good_issue():
+    """正常 issue(行号在 diff 内、级别合法、证据确定性) → keep。"""
+    from pr_review.quality import ACTION_KEEP, per_issue_verify
+
+    issues = [_issue(file="a.py", line=1, severity=2)]
+    verdicts = per_issue_verify(issues, {"a.py": {1}})
+    assert len(verdicts) == 1
+    assert verdicts[0].action == ACTION_KEEP
+
+
+def test_per_issue_verify_deletes_hallucination_and_missing_line():
+    """行号不在 diff 新增行(幻觉) / 行号缺失 → delete。"""
+    from pr_review.quality import ACTION_DELETE, per_issue_verify
+
+    issues = [
+        _issue(file="a.py", line=999),      # 幻觉
+        _issue(file="b.py", line=0),        # 行号缺失
+    ]
+    verdicts = per_issue_verify(issues, {"a.py": {1}})
+    actions = [v.action for v in verdicts]
+    assert actions == [ACTION_DELETE, ACTION_DELETE]
+
+
+def test_per_issue_verify_downgrades_hypothetical_high_severity():
+    """假设性证据 + 级别 ≥4 → downgrade 到 3(不拦合并)。"""
+    from pr_review.quality import ACTION_DOWNGRADE, per_issue_verify
+
+    issues = [
+        ReviewIssue(
+            file="b.py", line=3, severity=4, title="策略清理失败",
+            detail="若 RemoveFilteredPolicy 失败, 权限可能残留",
+            suggestion="", evidence="第 350 行, 失败时无回滚",
+        ),
+    ]
+    verdicts = per_issue_verify(issues, {"b.py": {3}})
+    assert verdicts[0].action == ACTION_DOWNGRADE
+    assert verdicts[0].new_severity == 3
+
+
+def test_per_issue_verify_does_not_downgrade_deterministic():
+    """确定性证据的 5 级(必然 panic) → keep, 不降级。"""
+    from pr_review.quality import ACTION_KEEP, per_issue_verify
+
+    issues = [
+        ReviewIssue(
+            file="c.py", line=5, severity=5, title="nil 解引用",
+            detail="user 为 nil, 直接访问 .Name 必然 panic",
+            suggestion="", evidence="第 21 行必有 nil",
+        ),
+    ]
+    verdicts = per_issue_verify(issues, {"c.py": {5}})
+    assert verdicts[0].action == ACTION_KEEP
+
+
+def test_per_issue_verify_fixes_out_of_range_severity():
+    """severity 越界 → fix 钳制到合法范围。"""
+    from pr_review.quality import ACTION_FIX, per_issue_verify
+
+    issues = [
+        ReviewIssue(file="c.py", line=2, severity=99, title="越界", detail="", suggestion=""),
+    ]
+    verdicts = per_issue_verify(issues, {"c.py": {2}})
+    assert verdicts[0].action == ACTION_FIX
+    assert verdicts[0].new_severity == 5  # 钳制到 5
+
+
+def test_apply_verdicts_filters_and_downgrades():
+    """apply_verdicts: 删除剔除, 降级改 severity, 保留不动。"""
+    from pr_review.quality import (
+        ACTION_DELETE,
+        ACTION_DOWNGRADE,
+        ACTION_KEEP,
+        IssueVerdict,
+        apply_verdicts,
+    )
+
+    good = _issue(file="a.py", line=1, severity=2)
+    bad = _issue(file="a.py", line=999, severity=4)
+    downgrade = _issue(file="b.py", line=3, severity=4)
+    verdicts = [
+        IssueVerdict(issue=good, action=ACTION_KEEP),
+        IssueVerdict(issue=bad, action=ACTION_DELETE, reason="幻觉"),
+        IssueVerdict(issue=downgrade, action=ACTION_DOWNGRADE, new_severity=3),
+    ]
+    kept = apply_verdicts(verdicts)
+    assert len(kept) == 2  # bad 被删除
+    assert kept[0] is good  # 保留的不动
+    assert kept[1].severity == 3  # 降级生效
+
+
+def test_sentinel_triggered_threshold():
+    """删除+降级比例 > 30% → 哨兵触发; 低于 → 不触发。"""
+    from pr_review.quality import (
+        ACTION_DELETE,
+        ACTION_KEEP,
+        IssueVerdict,
+        sentinel_triggered,
+    )
+
+    # 5 条里 2 条被处理 = 40% > 30% → 触发
+    verdicts = [
+        IssueVerdict(issue=_issue(file=f"a{i}.py", line=1), action=ACTION_KEEP)
+        for i in range(3)
+    ] + [
+        IssueVerdict(issue=_issue(file=f"b{i}.py", line=999), action=ACTION_DELETE)
+        for i in range(2)
+    ]
+    assert sentinel_triggered(verdicts) is True
+
+    # 5 条里 1 条被处理 = 20% < 30% → 不触发
+    verdicts = [
+        IssueVerdict(issue=_issue(file=f"a{i}.py", line=1), action=ACTION_KEEP)
+        for i in range(4)
+    ] + [IssueVerdict(issue=_issue(file="b.py", line=999), action=ACTION_DELETE)]
+    assert sentinel_triggered(verdicts) is False
+
+    # 空列表不触发
+    assert sentinel_triggered([]) is False

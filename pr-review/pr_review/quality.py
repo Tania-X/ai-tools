@@ -116,6 +116,118 @@ def _looks_hypothetical(issue: Any) -> bool:
     return any(m in hay for m in _HYPOTHETICAL_MARKERS)
 
 
+# ---------------------------------------------------------------------------
+# 逐条验证层(2026-08-20 质量门改造, 建议 1-3 落地)
+# 定位: 在 LLM judge 整批打分之前, 先用零成本确定性规则逐条处理 issue。
+# 对的不动, 错的单独处理; 删除/降级比例过高才触发整批重写(降级哨兵)。
+# ---------------------------------------------------------------------------
+
+# 逐条处理的动作
+ACTION_KEEP = "keep"        # 保留(未发现问题)
+ACTION_DELETE = "delete"    # 删除(幻觉/行号缺失/证据不成立)
+ACTION_DOWNGRADE = "downgrade"  # 降级(假设性证据 + 高级别, 按策略降到 3)
+ACTION_FIX = "fix"          # 修正(severity 越界等确定性修复)
+
+# 降级哨兵阈值: 删除+降级比例超过该值 → 判定本轮审查整体质量差
+SENTINEL_THRESHOLD = 0.30
+
+
+@dataclass
+class IssueVerdict:
+    """单条 issue 的逐条验证结论。"""
+
+    issue: Any
+    action: str = ACTION_KEEP
+    reason: str = ""
+    new_severity: int = 0  # 仅 ACTION_DOWNGRADE / ACTION_FIX 时有效
+
+
+def per_issue_verify(issues: list[Any], added_lines: dict[str, set[int]]) -> list[IssueVerdict]:
+    """确定性逐条验证(零成本, 不调 LLM)。
+
+    规则(对应 docs/pr-review-quality-gate.md §4 与 review-severity-policy skill):
+    1. 行号缺失(0 或 None) → delete(无法定位到 diff 行, 疑似幻觉)
+    2. 行号不在 diff 新增行 → delete(疑似幻觉; 只评本 PR 引入的问题)
+    3. severity 越界(非 1-5) → fix(钳制到合法范围)
+    4. 假设性证据 + 级别 ≥4 → downgrade 到 3(最高级误报: 会拦合并)
+       - 级别由两轴事实映射, 假设性触发最多 3(必修不阻塞)
+    5. 其余 → keep
+
+    返回 verdict 列表(与 issues 一一对应)。
+    """
+    verdicts: list[IssueVerdict] = []
+    for issue in issues:
+        sev = int(getattr(issue, "severity", 0) or 0)
+
+        # 1. 行号缺失
+        line = int(getattr(issue, "line", 0) or 0)
+        if line <= 0:
+            verdicts.append(IssueVerdict(issue=issue, action=ACTION_DELETE, reason="行号缺失, 无法定位到 diff 行"))
+            continue
+
+        # 2. 行号不在 diff 新增行(幻觉)
+        file = getattr(issue, "file", "") or ""
+        if added_lines.get(file) and line not in added_lines[file]:
+            verdicts.append(
+                IssueVerdict(issue=issue, action=ACTION_DELETE,
+                             reason=f"{file}:{line} 不在 diff 新增行(疑似幻觉, 只评本 PR 引入的问题)")
+            )
+            continue
+
+        # 3. severity 越界
+        if not (1 <= sev <= 5):
+            clamped = max(1, min(5, sev))
+            verdicts.append(
+                IssueVerdict(issue=issue, action=ACTION_FIX,
+                             reason=f"severity {sev} 越界(应 1-5), 钳制为 {clamped}",
+                             new_severity=clamped)
+            )
+            continue
+
+        # 4. 假设性证据 + 高级别(≥4) → 降级到 3(必修不阻塞)
+        if sev >= 4 and _looks_hypothetical(issue):
+            verdicts.append(
+                IssueVerdict(issue=issue, action=ACTION_DOWNGRADE,
+                             reason=f"证据是假设性故障(若…失败/可能/如果)但级别为 {sev}(≥4 会拦合并), 降级到 3",
+                             new_severity=3)
+            )
+            continue
+
+        # 5. 其余保留
+        verdicts.append(IssueVerdict(issue=issue, action=ACTION_KEEP))
+
+    return verdicts
+
+
+def apply_verdicts(verdicts: list[IssueVerdict]) -> list[Any]:
+    """按 verdict 执行: 删除的剔除, 降级/修正的改 severity, 保留的不动。"""
+    kept: list[Any] = []
+    for v in verdicts:
+        if v.action == ACTION_DELETE:
+            continue
+        if v.action in (ACTION_DOWNGRADE, ACTION_FIX) and v.new_severity:
+            v.issue.severity = v.new_severity
+        kept.append(v.issue)
+    return kept
+
+
+def sentinel_triggered(verdicts: list[IssueVerdict]) -> bool:
+    """降级哨兵: 删除+降级比例 > SENTINEL_THRESHOLD → 本轮审查整体质量差, 触发整批重写。"""
+    if not verdicts:
+        return False
+    touched = sum(1 for v in verdicts if v.action in (ACTION_DELETE, ACTION_DOWNGRADE))
+    return (touched / len(verdicts)) > SENTINEL_THRESHOLD
+
+
+def verdict_summary(verdicts: list[IssueVerdict]) -> str:
+    """人类可读的验证摘要(日志/降级评论用)。"""
+    parts = [f"共 {len(verdicts)} 条 issue:"]
+    for v in verdicts:
+        loc = f"{getattr(v.issue, 'file', '')}:{getattr(v.issue, 'line', '')}"
+        parts.append(f"  [{v.action}] {loc} — {v.reason}")
+    return "\n".join(parts)
+
+
 def build_judge_messages(
     result: Any,
     diff_text: str,

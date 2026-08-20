@@ -339,7 +339,14 @@ class ReviewRunner:
         *,
         handled: list[tuple[str, int]] | None = None,
     ) -> ReviewResult:
-        from .quality import Judge
+        from .quality import (
+            Judge,
+            SENTINEL_THRESHOLD,
+            apply_verdicts,
+            per_issue_verify,
+            sentinel_triggered,
+            verdict_summary,
+        )
 
         if result.parse_errors:
             result.quality_verdict = "degraded"
@@ -348,6 +355,40 @@ class ReviewRunner:
                 len(result.parse_errors), result.parse_errors[0][:200],
             )
             return result
+
+        # ── 逐条验证层(2026-08-20 改造, 建议 1): 零成本确定性先处理 ──
+        # 对的不动, 错的单独处理(删除幻觉/降级高判/修正越界), 不整批重写。
+        if result.issues:
+            verdicts = per_issue_verify(result.issues, result.added_lines)
+            touched = sum(1 for v in verdicts if v.action != "keep")
+            if touched:
+                logger.info(
+                    "质量门逐条验证: %d/%d 条被处理(删除/降级/修正):\n%s",
+                    touched, len(verdicts), verdict_summary(verdicts),
+                )
+                result.issues = apply_verdicts(verdicts)
+
+            # ── 降级哨兵(2026-08-20 改造, 建议 2): 处理比例异常高 → 整批重写 ──
+            if sentinel_triggered(verdicts):
+                result.quality_verdict = "rewrite"
+                logger.warning(
+                    "质量门降级哨兵触发: 删除/降级比例 > %.0f%%, 整批重审",
+                    SENTINEL_THRESHOLD * 100,
+                )
+                fresh = ReviewResult(
+                    model=result.model,
+                    skipped_files=result.skipped_files,
+                    added_lines=result.added_lines,
+                    batches=result.batches,
+                    rewrites=result.rewrites + 1,
+                )
+                feedback = [
+                    v.reason for v in verdicts
+                    if v.action in ("delete", "downgrade", "fix")
+                ][:10]
+                result = self._run_batches(pr, batches, fresh, handled=handled, feedback=feedback)
+                result.quality_verdict = "degraded" if result.rewrites >= self.config.quality_gate.max_rewrites else "pass"
+                return result
 
         judge = Judge(llm=self.llm, config=self.config.quality_gate)
         diff_text = self._diff_text()
