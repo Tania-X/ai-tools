@@ -14,6 +14,7 @@ import httpx
 
 from .config import GatewayConfig, ProviderConfig
 from .otel import get_tracer
+from .pricing import compute_cost, lookup_pricing
 
 
 class LLMError(Exception):
@@ -102,7 +103,7 @@ class LLMClient:
                     for tc in msg["tool_calls"]
                 ]
             usage = data.get("usage", {})
-            cost = self._compute_cost(pc, usage)
+            cost = self._compute_cost(pc, usage, payload["model"])
             span.set_attribute("llm.prompt_tokens", usage.get("prompt_tokens", 0))
             span.set_attribute("llm.completion_tokens", usage.get("completion_tokens", 0))
             span.set_attribute("llm.cost", cost)
@@ -163,9 +164,15 @@ class LLMClient:
 
     # ------------------------------------------------------------------ 成本统计
     @staticmethod
-    def _compute_cost(pc: ProviderConfig, usage: dict) -> float:
-        if pc.cost_per_1k_input is None:
-            return 0.0
-        pin = usage.get("prompt_tokens", 0) / 1000 * pc.cost_per_1k_input
-        pout = usage.get("completion_tokens", 0) / 1000 * (pc.cost_per_1k_output or 0.0)
-        return round(pin + pout, 6)
+    def _compute_cost(pc: ProviderConfig, usage: dict, model: str = "") -> float:
+        """成本核算: 显式单价(元/千)优先, 其次内置峰谷价表(按调用时刻北京时段 + 缓存命中/未命中)。"""
+        if pc.cost_per_1k_input is not None:
+            pin = usage.get("prompt_tokens", 0) / 1000 * pc.cost_per_1k_input
+            pout = usage.get("completion_tokens", 0) / 1000 * (pc.cost_per_1k_output or 0.0)
+            return round(pin + pout, 6)
+        pricing = lookup_pricing(model or pc.model)
+        if pricing is not None:
+            cost = compute_cost(usage, pricing)
+            if cost is not None:
+                return cost
+        return 0.0
