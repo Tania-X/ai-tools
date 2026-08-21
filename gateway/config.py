@@ -29,7 +29,8 @@ class ProviderConfig:
     temperature: float = 0.7
     timeout: float = 60.0
     max_retries: int = 3
-    # 单位:元 / 百万 tokens。留空则不核算成本,只统计 token 数。
+    # 单位:元 / 千 tokens(usage_tokens/1000 × 单价)。留空则不核算成本,只统计 token 数。
+    # 注意: DeepSeek 2026-08-19 起实行峰谷分时定价,官方"元/百万"价格需除以 1000 再填入。
     cost_per_1k_input: float | None = None
     cost_per_1k_output: float | None = None
 
@@ -113,6 +114,13 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
         temperature = os.environ.get("AI_GATEWAY_TEMPERATURE")
         if temperature:
             provider.temperature = float(temperature)
+        # 成本单价(元/千 tokens)。GitHub Action 通过 inputs 透传;DeepSeek 峰谷定价按实际时段填。
+        cost_in = os.environ.get("AI_GATEWAY_COST_PER_1K_INPUT")
+        if cost_in:
+            provider.cost_per_1k_input = float(cost_in)
+        cost_out = os.environ.get("AI_GATEWAY_COST_PER_1K_OUTPUT")
+        if cost_out:
+            provider.cost_per_1k_output = float(cost_out)
 
     if not cfg.providers:
         raise ValueError(

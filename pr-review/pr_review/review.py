@@ -206,14 +206,20 @@ class ReviewRunner:
     # ------------------------------------------------------------------ 入口
     def run(self) -> ReviewResult:
         tracer = get_tracer()
-        with tracer.start_as_current_span("pr_review.run") as root_span:
-            return self._run_inner(root_span)
-
-    def _run_inner(self, root_span: Any) -> ReviewResult:
+        # 根 span 用 "pr_review.run/<PR号>" 命名:UI 列表可直接区分每次 run(同一 PR 多次 push 用 head_sha 区分)
         pr = self.github.get_pr_info()
+        with tracer.start_as_current_span(f"pr_review.run/{pr.number}") as root_span:
+            root_span.set_attribute("pr.number", pr.number)
+            root_span.set_attribute("pr.title", pr.title)
+            root_span.set_attribute("pr.head_sha", pr.head_sha)
+            root_span.set_attribute("pr.head_ref", pr.head_ref)
+            root_span.set_attribute("pr.base_ref", pr.base_ref)
+            root_span.set_attribute("pr.repo", self.github.repo)
+            return self._run_inner(root_span, pr)
+
+    def _run_inner(self, root_span: Any, pr: PRInfo | None = None) -> ReviewResult:
+        pr = pr or self.github.get_pr_info()
         raw_files = self.github.get_pr_files()
-        root_span.set_attribute("pr.number", pr.number)
-        root_span.set_attribute("pr.title", pr.title)
         root_span.set_attribute("pr.files", len(raw_files))
 
         candidates: list[FileDiff] = []
