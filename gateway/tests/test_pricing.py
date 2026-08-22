@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,17 @@ def test_parse_pricing_html():
     assert parse_pricing_html(SAMPLE_HTML) == EXPECTED
 
 
+def test_parse_real_official_snapshot():
+    """用真实官网 HTML 快照验证解析器, 防止页面结构变化导致回归。"""
+    fixture = Path(__file__).parent / "fixtures" / "deepseek-pricing.html"
+    html = fixture.read_text(encoding="utf-8")
+    data = parse_pricing_html(html)
+    assert "deepseek-v4-flash" in data
+    assert "deepseek-v4-pro" in data
+    # 抽查一个关键价格, 防止解析器“看似成功但数值错位”
+    flash = data["deepseek-v4-flash"]
+    assert flash["input_miss_peak"] == 3.0
+    assert flash["output_peak"] == 9.0
 def test_fetch_deepseek_pricing_parses_live(monkeypatch):
     """验证 fetch 流程确实把 HTML 交给解析器(避免只测了解析器)。"""
     monkeypatch.setattr("gateway.pricing.parse_pricing_html", lambda html: EXPECTED)
@@ -178,3 +190,65 @@ class _FakeResp:
 
     def read(self):
         return self._html.encode("utf-8")
+
+
+def test_compute_cost_with_source_explicit():
+    pc = ProviderConfig(
+        name="deepseek",
+        base_url="https://api.deepseek.com",
+        api_keys=["k"],
+        model="deepseek-chat",
+        cost_per_1k_input=2.0,
+        cost_per_1k_output=8.0,
+    )
+    cost, source = LLMClient._compute_cost_with_source(
+        pc, {"prompt_tokens": 1000, "completion_tokens": 1000}, model="deepseek-chat"
+    )
+    assert cost == pytest.approx(2.0 + 8.0)
+    assert source == "explicit"
+
+
+def test_compute_cost_with_source_dynamic(monkeypatch):
+    pc = ProviderConfig(
+        name="deepseek",
+        base_url="https://api.deepseek.com",
+        api_keys=["k"],
+        model="deepseek-v4-flash",
+        dynamic_pricing=True,
+    )
+    monkeypatch.setattr(
+        "gateway.client.lookup_dynamic_pricing", lambda model, ttl=None: {
+            "input_hit_peak": 0.2,
+            "input_hit_offpeak": 0.1,
+            "input_miss_peak": 6.0,
+            "input_miss_offpeak": 3.0,
+            "output_peak": 18.0,
+            "output_offpeak": 9.0,
+        }
+    )
+    monkeypatch.setattr("gateway.pricing.is_peak_hour", lambda now=None: True)
+    cost, source = LLMClient._compute_cost_with_source(
+        pc, {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}, model="deepseek-v4-flash"
+    )
+    assert cost == pytest.approx(6.0 + 18.0)
+    assert source == "dynamic"
+
+
+def test_compute_cost_with_source_builtin_fallback(monkeypatch):
+    pc = ProviderConfig(
+        name="deepseek",
+        base_url="https://api.deepseek.com",
+        api_keys=["k"],
+        model="deepseek-v4-flash",
+        dynamic_pricing=True,
+    )
+    monkeypatch.setattr(
+        "gateway.client.lookup_dynamic_pricing",
+        lambda model, ttl=None: (_ for _ in ()).throw(RuntimeError("network down")),
+    )
+    monkeypatch.setattr("gateway.pricing.is_peak_hour", lambda now=None: True)
+    cost, source = LLMClient._compute_cost_with_source(
+        pc, {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}, model="deepseek-v4-flash"
+    )
+    assert cost == pytest.approx(3.0 + 9.0)
+    assert source == "builtin"

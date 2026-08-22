@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ai-tools"
 version = "0.1.0"
-description = "AI × DevOps 工具集 —— 独立 AI 能力层(gateway / pr-review / alert-explain / log-analyzer / ops-query / mcp-server)"
+description = "AI × DevOps 工具集 —— LLM 网关 / PR 审查引擎 / MCP 仓库工具 / Golden 评测"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",

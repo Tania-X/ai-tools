@@ -83,6 +83,7 @@ jobs:
 - 如需每次成本核算前自动拉取官网最新定价,可在 workflow 中加 `dynamic-pricing: "1"`(默认 0):
   - 进程内 TTL 缓存(默认 6 小时),避免每次 LLM 调用都请求官网;
   - 同时写入磁盘缓存,官网失败时优先使用最近一次成功拉取的价格;
+  - action 内置 `actions/cache` 缓存 `~/.cache/ai-tools`,减少 CI 跨任务重复请求官网;
   - 没有磁盘缓存时回退到内置价表;
   - 显式传入 `cost-per-1k-input/output` 仍为最高优先级。
 - 可调参数:

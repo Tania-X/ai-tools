@@ -7,9 +7,9 @@
 审查链路五个环节全部埋点, 形成嵌套 span 树:
 
 ```
-pr_review.run(根 span: pr.number/title/files)
+pr_review.run/{pr.number}(根 span: pr.number/title/files)
 └── review.batch(批次: batch.no/total/files)
-    ├── llm.chat(LLM 往返: provider/model/token/成本/耗时/tool_calls)
+    ├── llm.chat(LLM 往返: provider/model/token/成本/耗时/tool_calls/cost.source)
     └── repo_tools.execute(工具调用: 工具名/结果大小/耗时)
 └── review.quality_gate(judge 判定: verdict)
 ```
@@ -29,7 +29,7 @@ pr_review.run ─ 41s, issues=1, token=8111
 
 | 模块 | span | 属性 |
 |------|------|------|
-| gateway/client.py | `llm.chat` | provider/model/tools/prompt_tokens/completion_tokens/cost/tool_calls/content_len |
+| gateway/client.py | `llm.chat` | provider/model/tools/prompt_tokens/completion_tokens/cost/cost.source/cost.fallback/tool_calls/content_len |
 | pr_review/review.py run() | `pr_review.run` | pr.number/title/files |
 | pr_review/review.py _review_batch | `review.batch` | batch.no/total/files |
 | pr_review/review.py _chat_with_tools | `repo_tools.execute` | tool.name/result_len |

@@ -106,10 +106,12 @@ class LLMClient:
                     for tc in msg["tool_calls"]
                 ]
             usage = data.get("usage", {})
-            cost = self._compute_cost(pc, usage, payload["model"])
+            cost, cost_source = self._compute_cost_with_source(pc, usage, payload["model"])
             span.set_attribute("llm.prompt_tokens", usage.get("prompt_tokens", 0))
             span.set_attribute("llm.completion_tokens", usage.get("completion_tokens", 0))
             span.set_attribute("llm.cost", cost)
+            span.set_attribute("llm.cost.source", cost_source)
+            span.set_attribute("llm.cost.fallback", cost_source == "builtin" and bool(getattr(pc, "dynamic_pricing", False)))
             span.set_attribute("llm.tool_calls", len(tool_calls) if tool_calls else 0)
             span.set_attribute("llm.content_len", len(content))
         self.prompt_tokens += usage.get("prompt_tokens", 0)
@@ -169,24 +171,36 @@ class LLMClient:
     @staticmethod
     def _compute_cost(pc: ProviderConfig, usage: dict, model: str = "") -> float:
         """成本核算: 显式单价(元/千)优先, 其次动态官网价/内置峰谷价表。"""
+        return LLMClient._compute_cost_with_source(pc, usage, model)[0]
+
+    @staticmethod
+    def _compute_cost_with_source(
+        pc: ProviderConfig, usage: dict, model: str = ""
+    ) -> tuple[float, str]:
+        """返回 (成本, 来源), 来源用于 OTel 标记 explicit/dynamic/builtin/none。"""
         if pc.cost_per_1k_input is not None:
             pin = usage.get("prompt_tokens", 0) / 1000 * pc.cost_per_1k_input
             pout = usage.get("completion_tokens", 0) / 1000 * (pc.cost_per_1k_output or 0.0)
-            return round(pin + pout, 6)
+            return round(pin + pout, 6), "explicit"
 
         pricing = None
+        source = "none"
         if getattr(pc, "dynamic_pricing", False):
             try:
                 pricing = lookup_dynamic_pricing(
                     model or pc.model,
                     ttl=getattr(pc, "pricing_cache_ttl_seconds", None),
                 )
+                if pricing is not None:
+                    source = "dynamic"
             except Exception as e:  # 网络/解析失败不阻断审查, 回退内置价表
                 logger.warning("动态定价获取失败, 使用内置价表: %s", e)
         if pricing is None:
             pricing = lookup_pricing(model or pc.model)
+            if pricing is not None:
+                source = "builtin"
         if pricing is not None:
             cost = compute_cost(usage, pricing)
             if cost is not None:
-                return cost
-        return 0.0
+                return cost, source
+        return 0.0, "none"

@@ -30,7 +30,8 @@ def _run(coro):
 def test_server_registers_four_tools(tmp_path):
     mcp = create_server(_repo(tmp_path))
     for name in ["read_file", "grep", "ast_grep", "list_dir"]:
-        assert mcp.get_tool(name) is not None, f"工具 {name} 未注册"
+        tool = _run(mcp.get_tool(name))
+        assert tool is not None, f"工具 {name} 未注册"
 
 
 def _stdio_session_cm(repo: Path):
