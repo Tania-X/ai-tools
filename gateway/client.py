@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from dataclasses import dataclass, field
@@ -14,7 +15,9 @@ import httpx
 
 from .config import GatewayConfig, ProviderConfig
 from .otel import get_tracer
-from .pricing import compute_cost, lookup_pricing
+from .pricing import compute_cost, lookup_dynamic_pricing, lookup_pricing
+
+logger = logging.getLogger(__name__)
 
 
 class LLMError(Exception):
@@ -165,12 +168,23 @@ class LLMClient:
     # ------------------------------------------------------------------ 成本统计
     @staticmethod
     def _compute_cost(pc: ProviderConfig, usage: dict, model: str = "") -> float:
-        """成本核算: 显式单价(元/千)优先, 其次内置峰谷价表(按调用时刻北京时段 + 缓存命中/未命中)。"""
+        """成本核算: 显式单价(元/千)优先, 其次动态官网价/内置峰谷价表。"""
         if pc.cost_per_1k_input is not None:
             pin = usage.get("prompt_tokens", 0) / 1000 * pc.cost_per_1k_input
             pout = usage.get("completion_tokens", 0) / 1000 * (pc.cost_per_1k_output or 0.0)
             return round(pin + pout, 6)
-        pricing = lookup_pricing(model or pc.model)
+
+        pricing = None
+        if getattr(pc, "dynamic_pricing", False):
+            try:
+                pricing = lookup_dynamic_pricing(
+                    model or pc.model,
+                    ttl=getattr(pc, "pricing_cache_ttl_seconds", None),
+                )
+            except Exception as e:  # 网络/解析失败不阻断审查, 回退内置价表
+                logger.warning("动态定价获取失败, 使用内置价表: %s", e)
+        if pricing is None:
+            pricing = lookup_pricing(model or pc.model)
         if pricing is not None:
             cost = compute_cost(usage, pricing)
             if cost is not None:

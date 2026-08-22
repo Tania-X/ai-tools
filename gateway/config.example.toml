@@ -13,6 +13,10 @@ timeout = 60
 max_retries = 3
 cost_per_1k_input = 2.0
 cost_per_1k_output = 8.0
+# 自动从官网拉取最新 DeepSeek 峰谷定价(1/0);显式 cost_per_1k_* 仍优先
+dynamic_pricing = true
+# 动态定价缓存 TTL 秒数(可选, 默认 21600 = 6 小时; 0 表示每次都刷新)
+pricing_cache_ttl_seconds = 21600
 
 # 多 provider 示例(多 key 用逗号分隔,自动轮询):
 # [providers.kimi]

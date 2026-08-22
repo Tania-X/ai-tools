@@ -80,13 +80,13 @@ def spans(tmp_path, monkeypatch):
 def test_span_tree_complete(spans):
     """根/批次/工具 span 齐全(mock LLM 不产生 llm.chat, 后者单独测)。"""
     names = {s.name for s in spans}
-    assert "pr_review.run" in names
+    assert "pr_review.run/9" in names
     assert "review.batch" in names
     assert "repo_tools.execute" in names
 
 
 def test_root_span_attributes(spans):
-    root = next(s for s in spans if s.name == "pr_review.run")
+    root = next(s for s in spans if s.name == "pr_review.run/9")
     assert root.attributes.get("pr.number") == 9
     assert root.attributes.get("pr.files") == 1
 
@@ -147,7 +147,7 @@ def test_parent_child_relation(spans):
     """工具 span 是批次 span 的后代。"""
     tool = next(s for s in spans if s.name == "repo_tools.execute")
     batch = next(s for s in spans if s.name == "review.batch")
-    root = next(s for s in spans if s.name == "pr_review.run")
+    root = next(s for s in spans if s.name == "pr_review.run/9")
     assert tool.parent is not None
     assert tool.parent.span_id == batch.context.span_id
     assert batch.parent is not None

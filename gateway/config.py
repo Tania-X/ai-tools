@@ -33,6 +33,10 @@ class ProviderConfig:
     # 注意: DeepSeek 2026-08-19 起实行峰谷分时定价,官方"元/百万"价格需除以 1000 再填入。
     cost_per_1k_input: float | None = None
     cost_per_1k_output: float | None = None
+    # 自动从 DeepSeek 官网拉取最新峰谷定价(进程内 TTL 缓存);显式 cost_per_1k_* 始终优先。
+    dynamic_pricing: bool = False
+    # 动态定价缓存 TTL 秒数;None 时读取 AI_GATEWAY_PRICING_TTL_SECONDS, 再默认 6 小时。
+    pricing_cache_ttl_seconds: float | None = None
 
 
 @dataclass
@@ -52,6 +56,13 @@ def _env_list(value: str | None) -> list[str]:
     return [k.strip() for k in value.split(",") if k.strip()] if value else []
 
 
+def _as_bool(value) -> bool:
+    """兼容 TOML 原生 bool 和字符串 '1'/'true'/'yes'/'on'。"""
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_config(path: str | Path | None = None) -> GatewayConfig:
     """加载配置:先读 TOML 文件(如有),再让环境变量覆盖。
 
@@ -65,6 +76,8 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
         temperature = 0.7
         cost_per_1k_input = 2.0
         cost_per_1k_output = 8.0
+        dynamic_pricing = true
+        pricing_cache_ttl_seconds = 21600
     """
     cfg = GatewayConfig()
 
@@ -87,6 +100,12 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
             max_retries=int(pc.get("max_retries", 3)),
             cost_per_1k_input=pc.get("cost_per_1k_input"),
             cost_per_1k_output=pc.get("cost_per_1k_output"),
+            dynamic_pricing=_as_bool(pc.get("dynamic_pricing", False)),
+            pricing_cache_ttl_seconds=(
+                float(pc["pricing_cache_ttl_seconds"])
+                if pc.get("pricing_cache_ttl_seconds") is not None
+                else None
+            ),
         )
 
     # 环境变量:单 provider 快捷配置(适合 GitHub Action 场景)
@@ -121,6 +140,15 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
         cost_out = os.environ.get("AI_GATEWAY_COST_PER_1K_OUTPUT")
         if cost_out:
             provider.cost_per_1k_output = float(cost_out)
+        dynamic = os.environ.get("AI_GATEWAY_DYNAMIC_PRICING")
+        if dynamic:
+            provider.dynamic_pricing = dynamic.strip().lower() in ("1", "true", "yes", "on")
+        ttl_raw = os.environ.get("AI_GATEWAY_PRICING_TTL_SECONDS")
+        if ttl_raw:
+            try:
+                provider.pricing_cache_ttl_seconds = float(ttl_raw)
+            except ValueError:
+                pass
 
     if not cfg.providers:
         raise ValueError(

@@ -29,6 +29,14 @@ inputs:
     description: "输出单价(元/千 tokens),同上"
     required: false
     default: ""
+  dynamic-pricing:
+    description: "每次成本核算时自动从 DeepSeek 官网拉取最新峰谷定价(1/0), 默认 0; 显式 cost-per-1k 仍优先"
+    required: false
+    default: "0"
+  pricing-ttl-seconds:
+    description: "动态定价缓存 TTL 秒数, 默认 21600(6 小时); 0 表示每次都刷新"
+    required: false
+    default: ""
   otel-enabled:
     description: "启用 OpenTelemetry 上报(1/0), 默认 0"
     required: false
@@ -70,6 +78,8 @@ runs:
         AI_GATEWAY_MODEL: ${{ inputs.model }}
         AI_GATEWAY_COST_PER_1K_INPUT: ${{ inputs.cost-per-1k-input }}
         AI_GATEWAY_COST_PER_1K_OUTPUT: ${{ inputs.cost-per-1k-output }}
+        AI_GATEWAY_DYNAMIC_PRICING: ${{ inputs.dynamic-pricing }}
+        AI_GATEWAY_PRICING_TTL_SECONDS: ${{ inputs.pricing-ttl-seconds }}
         AI_REVIEW_CONFIG: ${{ inputs.config-path }}
         OTEL_ENABLED: ${{ inputs.otel-enabled }}
         OTEL_EXPORTER_OTLP_ENDPOINT: ${{ inputs.otel-endpoint }}

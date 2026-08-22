@@ -56,3 +56,37 @@ def test_empty_env_does_not_crash_int_parse(monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_TEMPERATURE", "")
     cfg = load_config()  # 不抛异常即通过
     assert cfg.get("deepseek").max_tokens == 1024
+
+
+def test_dynamic_pricing_env_parsed(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("AI_GATEWAY_PROVIDER", "deepseek")
+    monkeypatch.setenv("AI_GATEWAY_API_KEYS", "sk-test")
+    monkeypatch.setenv("AI_GATEWAY_DYNAMIC_PRICING", "1")
+    monkeypatch.setenv("AI_GATEWAY_PRICING_TTL_SECONDS", "3600")
+
+    cfg = load_config()
+    pc = cfg.get("deepseek")
+    assert pc.dynamic_pricing is True
+    assert pc.pricing_cache_ttl_seconds == 3600.0
+
+
+def test_dynamic_pricing_toml_parsed(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    toml = tmp_path / "gateway.toml"
+    toml.write_text(
+        """
+default_provider = "deepseek"
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+api_keys = ["sk-test"]
+dynamic_pricing = true
+pricing_cache_ttl_seconds = 60
+""".strip(),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(toml)
+    pc = cfg.get("deepseek")
+    assert pc.dynamic_pricing is True
+    assert pc.pricing_cache_ttl_seconds == 60.0
