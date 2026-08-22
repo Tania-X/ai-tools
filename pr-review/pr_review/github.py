@@ -5,28 +5,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+
+from .types import PRInfo
 
 API_VERSION_HEADERS = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
 }
-
-
-@dataclass
-class PRInfo:
-    """PR 元信息(供 prompt 上下文使用)。"""
-
-    number: int
-    title: str
-    body: str
-    head_sha: str
-    head_ref: str
-    base_ref: str
-
 
 # 我们发布的 review 评论标识(用于统计"第 N 次评审")
 REVIEW_MARKER = "🤖 AI 代码审查"

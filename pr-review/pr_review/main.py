@@ -168,7 +168,7 @@ def main() -> None:
 
     with GitHubClient(token=token, repo=repo, pr_number=pr_number) as github:
         runner = ReviewRunner(
-            github=github,
+            platform=github,
             llm=llm,
             config=review_cfg,
             repo_root=repo_root,
