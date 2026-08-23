@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from .types import PRInfo
+from .types import PRFile, PRInfo
 
 
 @runtime_checkable
@@ -19,7 +19,7 @@ class ReviewPlatform(Protocol):
 
     # 元信息与 diff
     def get_pr_info(self) -> PRInfo: ...
-    def get_pr_files(self, per_page: int = 100) -> list[dict]: ...
+    def get_pr_files(self, per_page: int = 100) -> list[PRFile]: ...
 
     # 评论/门禁/线程(主要由入口层使用, 核心引擎按需使用)
     def post_review(

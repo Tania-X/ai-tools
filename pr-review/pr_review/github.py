@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from .types import PRInfo
+from .types import PRFile, PRInfo
 
 API_VERSION_HEADERS = {
     "Accept": "application/vnd.github+json",
@@ -61,16 +61,24 @@ class GitHubClient:
         )
 
     # ------------------------------------------------------------------ 文件与 diff
-    def get_pr_files(self, per_page: int = 100) -> list[dict]:
-        """分页取 PR 文件列表(每项含 filename/status/patch/additions/deletions)。"""
-        files: list[dict] = []
+    def get_pr_files(self, per_page: int = 100) -> list[PRFile]:
+        """分页取 PR 文件列表, 并转换为平台无关的 PRFile。"""
+        files: list[PRFile] = []
         page = 1
         while True:
             batch = self._get(
                 f"/repos/{self.repo}/pulls/{self.pr_number}/files",
                 params={"per_page": per_page, "page": page},
             )
-            files.extend(batch)
+            files.extend(
+                PRFile(
+                    filename=item.get("filename", ""),
+                    status=item.get("status", "modified"),
+                    patch=item.get("patch", ""),
+                    previous_filename=item.get("previous_filename", ""),
+                )
+                for item in batch
+            )
             if len(batch) < per_page:
                 break
             page += 1

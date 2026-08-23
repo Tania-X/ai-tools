@@ -20,7 +20,7 @@ from .config import ReviewConfig
 from .diff import DiffHunk, FileDiff, parse_diff
 from .platform import ReviewPlatform
 from .prompt import build_messages, parse_review_json
-from .types import PRInfo
+from .types import PRFile, PRInfo
 from .reply import RESOLUTION_MARK_RE
 from .repo_tools import TOOL_SCHEMAS, RepoTools
 
@@ -229,7 +229,8 @@ class ReviewRunner:
         candidates: list[FileDiff] = []
         skipped = 0
         for item in raw_files:
-            path = item.get("filename", "")
+            pr_file = self._coerce_pr_file(item)
+            path = pr_file.filename
             if self.config.should_ignore(path):
                 skipped += 1
                 continue
@@ -237,7 +238,7 @@ class ReviewRunner:
                 skipped += 1
                 continue
             # 没有 patch 的(超大文件/二进制)跳过
-            patch = item.get("patch", "")
+            patch = pr_file.patch
             if not patch:
                 skipped += 1
                 continue
@@ -250,8 +251,8 @@ class ReviewRunner:
             candidates.append(
                 FileDiff(
                     path=path,
-                    old_path=item.get("previous_filename", ""),
-                    status=item.get("status", "modified"),
+                    old_path=pr_file.previous_filename,
+                    status=pr_file.status,
                     hunks=parsed[0].hunks,
                 )
             )
@@ -287,6 +288,18 @@ class ReviewRunner:
         # 排序: severity 降序(数字大优先, 5致命→1建议), 同级别按 file+line
         result.issues.sort(key=lambda i: (-i.severity, i.file, i.line))
         return result
+
+    @staticmethod
+    def _coerce_pr_file(item: PRFile | dict) -> PRFile:
+        """兼容平台返回 PRFile 或旧版 dict(测试/旧 adapter 可能仍传 dict)。"""
+        if isinstance(item, PRFile):
+            return item
+        return PRFile(
+            filename=item.get("filename", ""),
+            status=item.get("status", "modified"),
+            patch=item.get("patch", ""),
+            previous_filename=item.get("previous_filename", ""),
+        )
 
     # ------------------------------------------------------------------ 批次执行
     def _run_batches(
