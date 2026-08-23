@@ -3,7 +3,7 @@
 import pytest
 
 from pr_review.config import ReviewConfig
-from pr_review.main import _check_summary, _check_title, _has_blocking_issues
+from pr_review.output import check_summary, check_title, has_blocking_issues
 from pr_review.review import ReviewIssue, ReviewResult
 
 
@@ -26,52 +26,52 @@ def _issue(severity, needs_review: bool = False) -> ReviewIssue:
 # ---------------------------------------------------------------- 门禁判定
 def test_block_on_error_by_default():
     cfg = ReviewConfig(fail_on_severity=4)
-    assert _has_blocking_issues(cfg, _result(_issue("error")))
+    assert has_blocking_issues(cfg, _result(_issue("error")))
     # 只有 warn 不拦
-    assert not _has_blocking_issues(cfg, _result(_issue("warn")))
-    assert not _has_blocking_issues(cfg, _result(_issue("info")))
+    assert not has_blocking_issues(cfg, _result(_issue("warn")))
+    assert not has_blocking_issues(cfg, _result(_issue("info")))
 
 
 def test_needs_review_never_blocks():
     """AI 不确定(needs_review)的问题不计入门禁,避免误报阻塞合并。"""
     cfg = ReviewConfig(fail_on_severity=4)
-    assert not _has_blocking_issues(cfg, _result(_issue("error", needs_review=True)))
-    assert not _has_blocking_issues(cfg, _result(_issue("warn", needs_review=True)))
+    assert not has_blocking_issues(cfg, _result(_issue("error", needs_review=True)))
+    assert not has_blocking_issues(cfg, _result(_issue("warn", needs_review=True)))
     # 混合: 确定的 error 仍然拦
-    assert _has_blocking_issues(
+    assert has_blocking_issues(
         cfg, _result(_issue("error", needs_review=True), _issue("error"))
     )
 
 
 def test_block_on_warn_when_configured():
     cfg = ReviewConfig(fail_on_severity=2)
-    assert _has_blocking_issues(cfg, _result(_issue("warn")))
-    assert _has_blocking_issues(cfg, _result(_issue("error")))
-    assert not _has_blocking_issues(cfg, _result(_issue("info")))
+    assert has_blocking_issues(cfg, _result(_issue("warn")))
+    assert has_blocking_issues(cfg, _result(_issue("error")))
+    assert not has_blocking_issues(cfg, _result(_issue("info")))
 
 
 def test_off_never_blocks():
     cfg = ReviewConfig(fail_on_severity=0)
-    assert not _has_blocking_issues(cfg, _result(_issue("error")))
+    assert not has_blocking_issues(cfg, _result(_issue("error")))
 
 
 def test_empty_result_never_blocks():
     cfg = ReviewConfig(fail_on_severity=4)
-    assert not _has_blocking_issues(cfg, _result())
+    assert not has_blocking_issues(cfg, _result())
 
 
 # ---------------------------------------------------------------- check-run 文本
 def test_check_title_blocked():
     cfg = ReviewConfig(fail_on_severity=4)
     r = _result(_issue("error"), _issue("error"), _issue("warn"))
-    title = _check_title(r, True, cfg)
+    title = check_title(r, True, cfg)
     assert "2 严重" in title and "1 轻微" in title
 
 
 def test_check_title_passed_with_warns():
     cfg = ReviewConfig(fail_on_severity=4)
     r = _result(_issue("warn"))
-    assert "未达到门禁级别" in _check_title(r, False, cfg)
+    assert "未达到门禁级别" in check_title(r, False, cfg)
 
 
 def test_check_summary_contains_stats():
@@ -79,7 +79,7 @@ def test_check_summary_contains_stats():
     r = _result(_issue("error"), _issue("warn"), _issue("info"))
     r.total_tokens = 1000
     r.total_cost = 0.01
-    summary = _check_summary(r, cfg)
+    summary = check_summary(r, cfg)
     assert "严重 1" in summary and "轻微 1" in summary and "建议 1" in summary
     assert "门禁线: 4" in summary and "必修线: 3" in summary
 
