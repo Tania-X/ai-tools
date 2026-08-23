@@ -169,3 +169,25 @@ cost_per_1k_output = 12.0
     assert kimi.model == "moonshot-v1-8k"
     assert kimi.max_tokens == 512
     assert kimi.cost_per_1k_input == 12.0
+
+
+def test_chat_sends_provider_extra_body(monkeypatch):
+    from gateway.config import GatewayConfig, ProviderConfig
+
+    pc = ProviderConfig(
+        name="deepseek",
+        base_url="https://api.deepseek.com",
+        api_keys=["k"],
+        model="deepseek-chat",
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    client = LLMClient(GatewayConfig(providers={"deepseek": pc}))
+    captured = {}
+
+    def handler(self, url, json, headers, timeout):
+        captured["payload"] = json
+        return fake_response()
+
+    stub_post(monkeypatch, handler)
+    client.chat([{"role": "user", "content": "hi"}])
+    assert captured["payload"]["thinking"] == {"type": "disabled"}

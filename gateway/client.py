@@ -75,6 +75,8 @@ class LLMClient:
             "max_tokens": max_tokens or pc.max_tokens,
             "temperature": temperature if temperature is not None else pc.temperature,
         }
+        # provider 级额外参数(如 DeepSeek thinking 开关), 可覆盖默认 body
+        payload.update(pc.extra_body or {})
         if tools is not None:
             payload["tools"] = tools
         if tool_choice is not None:

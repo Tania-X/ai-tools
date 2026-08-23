@@ -18,6 +18,7 @@
     --provider NAME
     --base-url URL
     --model MODEL
+    --no-thinking
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ def main() -> None:
     parser.add_argument("--provider", default=None, help="provider name: deepseek/kimi/openai/custom")
     parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL")
     parser.add_argument("--model", default=None, help="model name")
+    parser.add_argument("--no-thinking", action="store_true", help="disable DeepSeek thinking mode")
     args = parser.parse_args()
 
     # 显式 CLI 参数优先, 转成 gateway 可识别的环境变量
@@ -63,6 +65,8 @@ def main() -> None:
         os.environ["AI_GATEWAY_BASE_URL"] = args.base_url
     if args.model:
         os.environ["AI_GATEWAY_MODEL"] = args.model
+    if args.no_thinking:
+        os.environ["AI_GATEWAY_EXTRA_BODY"] = '{"thinking": {"type": "disabled"}}'
 
     platform = LocalPlatform(args.repo, base=args.base, head=args.head)
     review_cfg = load_review_config(args.config)
