@@ -1,17 +1,29 @@
 """本地 CLI: 用 LocalPlatform 跑一次不依赖 GitHub 的代码审查。
 
 用法:
+    # DeepSeek(默认 provider)
     AI_GATEWAY_API_KEYS=sk-xxx python -m pr_review.cli --repo /path/to/repo
 
+    # 其他 OpenAI 兼容服务
+    python -m pr_review.cli --repo /path/to/repo \
+        --provider openai --base-url https://api.openai.com \
+        --model gpt-4o --api-key sk-xxx
+
 可选参数:
+    --repo PATH
     --base HEAD~1
     --head HEAD
     --config .ai-review.yaml
+    --api-key KEY
+    --provider NAME
+    --base-url URL
+    --model MODEL
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -36,7 +48,21 @@ def main() -> None:
     parser.add_argument("--base", default="HEAD~1", help="base revision")
     parser.add_argument("--head", default="HEAD", help="head revision")
     parser.add_argument("--config", default=".ai-review.yaml", help="review config path")
+    parser.add_argument("--api-key", default=None, help="LLM API key (overrides AI_GATEWAY_API_KEYS)")
+    parser.add_argument("--provider", default=None, help="provider name: deepseek/kimi/openai/custom")
+    parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL")
+    parser.add_argument("--model", default=None, help="model name")
     args = parser.parse_args()
+
+    # 显式 CLI 参数优先, 转成 gateway 可识别的环境变量
+    if args.api_key:
+        os.environ["AI_GATEWAY_API_KEYS"] = args.api_key
+    if args.provider:
+        os.environ["AI_GATEWAY_PROVIDER"] = args.provider
+    if args.base_url:
+        os.environ["AI_GATEWAY_BASE_URL"] = args.base_url
+    if args.model:
+        os.environ["AI_GATEWAY_MODEL"] = args.model
 
     platform = LocalPlatform(args.repo, base=args.base, head=args.head)
     review_cfg = load_review_config(args.config)
