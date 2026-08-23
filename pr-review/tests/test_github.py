@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 from pr_review.github import GitHubClient
+from pr_review.types import PRFile
 
 
 def _client(reviews_per_page: list[list[dict]]):
@@ -37,3 +38,18 @@ def test_count_ai_reviews_paginated():
     client = _client([page1, page2])
     assert client.count_ai_reviews() == 101
     assert client._get.call_count == 2  # 满 100 继续翻页, 不足 100 停止
+
+
+def test_get_pr_files_returns_prfile():
+    client = _client([
+        [
+            {"filename": "src/app.py", "status": "modified", "patch": "@@ -1 +1 @@", "previous_filename": ""},
+            {"filename": "old.py", "status": "renamed", "patch": "", "previous_filename": "src/old.py"},
+        ]
+    ])
+    files = client.get_pr_files()
+    assert len(files) == 2
+    assert all(isinstance(f, PRFile) for f in files)
+    assert files[0].filename == "src/app.py"
+    assert files[0].patch == "@@ -1 +1 @@"
+    assert files[1].previous_filename == "src/old.py"

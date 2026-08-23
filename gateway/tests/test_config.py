@@ -90,3 +90,16 @@ pricing_cache_ttl_seconds = 60
     pc = cfg.get("deepseek")
     assert pc.dynamic_pricing is True
     assert pc.pricing_cache_ttl_seconds == 60.0
+
+
+def test_extra_body_env_parsed(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("AI_GATEWAY_PROVIDER", "deepseek")
+    monkeypatch.setenv("AI_GATEWAY_API_KEYS", "sk-test")
+    monkeypatch.setenv(
+        "AI_GATEWAY_EXTRA_BODY", '{"thinking": {"type": "disabled"}}'
+    )
+
+    cfg = load_config()
+    pc = cfg.get("deepseek")
+    assert pc.extra_body == {"thinking": {"type": "disabled"}}

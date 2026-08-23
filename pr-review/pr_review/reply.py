@@ -16,7 +16,8 @@ from typing import Any
 
 from gateway import LLMClient
 
-from .github import GitHubClient, REVIEW_MARKER
+from .github import REVIEW_MARKER
+from .platform import ReviewPlatform
 from .prompt import build_reply_messages
 
 logger = logging.getLogger("pr_review.reply")
@@ -40,7 +41,7 @@ RESOLUTION_MARK_RE = r"<!-- pr-review:(resolve|ignore):(.+):(\d+) -->"
 class ReplyHandler:
     """处理一条用户对 AI 审查评论的回复。"""
 
-    def __init__(self, github: GitHubClient, llm: LLMClient):
+    def __init__(self, github: ReviewPlatform, llm: LLMClient):
         self.github = github
         self.llm = llm
 

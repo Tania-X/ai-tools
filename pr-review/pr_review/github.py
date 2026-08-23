@@ -5,28 +5,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+
+from .types import PRFile, PRInfo
 
 API_VERSION_HEADERS = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
 }
-
-
-@dataclass
-class PRInfo:
-    """PR 元信息(供 prompt 上下文使用)。"""
-
-    number: int
-    title: str
-    body: str
-    head_sha: str
-    head_ref: str
-    base_ref: str
-
 
 # 我们发布的 review 评论标识(用于统计"第 N 次评审")
 REVIEW_MARKER = "🤖 AI 代码审查"
@@ -73,16 +61,24 @@ class GitHubClient:
         )
 
     # ------------------------------------------------------------------ 文件与 diff
-    def get_pr_files(self, per_page: int = 100) -> list[dict]:
-        """分页取 PR 文件列表(每项含 filename/status/patch/additions/deletions)。"""
-        files: list[dict] = []
+    def get_pr_files(self, per_page: int = 100) -> list[PRFile]:
+        """分页取 PR 文件列表, 并转换为平台无关的 PRFile。"""
+        files: list[PRFile] = []
         page = 1
         while True:
             batch = self._get(
                 f"/repos/{self.repo}/pulls/{self.pr_number}/files",
                 params={"per_page": per_page, "page": page},
             )
-            files.extend(batch)
+            files.extend(
+                PRFile(
+                    filename=item.get("filename", ""),
+                    status=item.get("status", "modified"),
+                    patch=item.get("patch", ""),
+                    previous_filename=item.get("previous_filename", ""),
+                )
+                for item in batch
+            )
             if len(batch) < per_page:
                 break
             page += 1

@@ -18,8 +18,9 @@ from gateway.otel import get_tracer
 
 from .config import ReviewConfig
 from .diff import DiffHunk, FileDiff, parse_diff
-from .github import GitHubClient, PRInfo
+from .platform import ReviewPlatform
 from .prompt import build_messages, parse_review_json
+from .types import PRFile, PRInfo
 from .reply import RESOLUTION_MARK_RE
 from .repo_tools import TOOL_SCHEMAS, RepoTools
 
@@ -186,15 +187,18 @@ class ReviewRunner:
 
     def __init__(
         self,
-        github: GitHubClient,
-        llm: LLMClient,
-        config: ReviewConfig,
+        github: ReviewPlatform | None = None,
+        llm: LLMClient | None = None,
+        config: ReviewConfig | None = None,
         *,
+        platform: ReviewPlatform | None = None,
         max_retry_bad_json: int = 3,
         repo_root: str | Path | None = None,
         context: str = "",
     ):
-        self.github = github
+        # 兼容旧调用 ReviewRunner(github=...); 新代码优先传 platform。
+        self.platform = platform if platform is not None else github
+        self.github = self.platform
         self.llm = llm
         self.config = config
         self.max_retry_bad_json = max_retry_bad_json
@@ -207,25 +211,26 @@ class ReviewRunner:
     def run(self) -> ReviewResult:
         tracer = get_tracer()
         # 根 span 用 "pr_review.run/<PR号>" 命名:UI 列表可直接区分每次 run(同一 PR 多次 push 用 head_sha 区分)
-        pr = self.github.get_pr_info()
+        pr = self.platform.get_pr_info()
         with tracer.start_as_current_span(f"pr_review.run/{pr.number}") as root_span:
             root_span.set_attribute("pr.number", pr.number)
             root_span.set_attribute("pr.title", pr.title)
             root_span.set_attribute("pr.head_sha", pr.head_sha)
             root_span.set_attribute("pr.head_ref", pr.head_ref)
             root_span.set_attribute("pr.base_ref", pr.base_ref)
-            root_span.set_attribute("pr.repo", self.github.repo)
+            root_span.set_attribute("pr.repo", self.platform.repo)
             return self._run_inner(root_span, pr)
 
     def _run_inner(self, root_span: Any, pr: PRInfo | None = None) -> ReviewResult:
-        pr = pr or self.github.get_pr_info()
-        raw_files = self.github.get_pr_files()
+        pr = pr or self.platform.get_pr_info()
+        raw_files = self.platform.get_pr_files()
         root_span.set_attribute("pr.files", len(raw_files))
 
         candidates: list[FileDiff] = []
         skipped = 0
         for item in raw_files:
-            path = item.get("filename", "")
+            pr_file = self._coerce_pr_file(item)
+            path = pr_file.filename
             if self.config.should_ignore(path):
                 skipped += 1
                 continue
@@ -233,7 +238,7 @@ class ReviewRunner:
                 skipped += 1
                 continue
             # 没有 patch 的(超大文件/二进制)跳过
-            patch = item.get("patch", "")
+            patch = pr_file.patch
             if not patch:
                 skipped += 1
                 continue
@@ -246,8 +251,8 @@ class ReviewRunner:
             candidates.append(
                 FileDiff(
                     path=path,
-                    old_path=item.get("previous_filename", ""),
-                    status=item.get("status", "modified"),
+                    old_path=pr_file.previous_filename,
+                    status=pr_file.status,
                     hunks=parsed[0].hunks,
                 )
             )
@@ -283,6 +288,18 @@ class ReviewRunner:
         # 排序: severity 降序(数字大优先, 5致命→1建议), 同级别按 file+line
         result.issues.sort(key=lambda i: (-i.severity, i.file, i.line))
         return result
+
+    @staticmethod
+    def _coerce_pr_file(item: PRFile | dict) -> PRFile:
+        """兼容平台返回 PRFile 或旧版 dict(测试/旧 adapter 可能仍传 dict)。"""
+        if isinstance(item, PRFile):
+            return item
+        return PRFile(
+            filename=item.get("filename", ""),
+            status=item.get("status", "modified"),
+            patch=item.get("patch", ""),
+            previous_filename=item.get("previous_filename", ""),
+        )
 
     # ------------------------------------------------------------------ 批次执行
     def _run_batches(
@@ -473,7 +490,7 @@ class ReviewRunner:
             return []
         handled: list[tuple[str, int]] = []
         try:
-            comments = self.github.get_pull_comments()
+            comments = self.platform.get_pull_comments()
         except Exception as e:  # 网络/权限异常不阻塞主流程
             logger.warning("扫描线程失败(决议驱动降级为不启用): %s", e)
             return []

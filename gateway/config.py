@@ -6,10 +6,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # 各 provider 默认端点(可在配置中覆盖)
 DEFAULT_BASE_URLS = {
@@ -37,6 +41,8 @@ class ProviderConfig:
     dynamic_pricing: bool = False
     # 动态定价缓存 TTL 秒数;None 时读取 AI_GATEWAY_PRICING_TTL_SECONDS, 再默认 6 小时。
     pricing_cache_ttl_seconds: float | None = None
+    # 每次 chat 请求附加的额外 body 参数(如 DeepSeek thinking 开关)。
+    extra_body: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -106,6 +112,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 if pc.get("pricing_cache_ttl_seconds") is not None
                 else None
             ),
+            extra_body=dict(pc.get("extra_body") or {}),
         )
 
     # 环境变量:单 provider 快捷配置(适合 GitHub Action 场景)
@@ -149,6 +156,12 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 provider.pricing_cache_ttl_seconds = float(ttl_raw)
             except ValueError:
                 pass
+        extra_body_raw = os.environ.get("AI_GATEWAY_EXTRA_BODY")
+        if extra_body_raw:
+            try:
+                provider.extra_body = json.loads(extra_body_raw)
+            except ValueError:
+                logger.warning("AI_GATEWAY_EXTRA_BODY 不是合法 JSON: %r", extra_body_raw)
 
     if not cfg.providers:
         raise ValueError(

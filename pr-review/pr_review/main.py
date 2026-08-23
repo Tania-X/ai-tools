@@ -35,60 +35,12 @@ from pr_review.config import load_config as load_review_config  # noqa: E402
 from pr_review.config import ReviewConfig  # noqa: E402
 from pr_review.context import ContextCollector  # noqa: E402
 from pr_review.github import GitHubClient, GitHubError  # noqa: E402
-from pr_review.review import ReviewRunner, ReviewResult, ToolLoopError  # noqa: E402
+from pr_review.output import check_summary, check_title, has_blocking_issues  # noqa: E402
+from pr_review.platform import ReviewPlatform  # noqa: E402
+from pr_review.review import ReviewRunner, ToolLoopError  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("pr_review.main")
-
-
-def _has_blocking_issues(cfg: ReviewConfig, result: ReviewResult) -> bool:
-    """是否达到合并门禁(fail_on_severity)级别的问题。
-
-    needs_review=true 的问题(设计意图类不确定判断)不计入门禁——避免误报阻塞合并。
-    fail_on_severity 0 = 永不拦(只发评论)。
-    """
-    threshold = cfg.fail_on_severity
-    if threshold <= 0:
-        return False
-    return any(
-        not issue.needs_review and issue.severity >= threshold
-        for issue in result.issues
-    )
-
-
-def _severity_label(sev: int) -> str:
-    """数字级别 → 展示名(1建议~5致命)。"""
-    from pr_review.review import SEVERITY_META
-
-    return SEVERITY_META.get(sev, SEVERITY_META[2])["name"]
-
-
-def _check_title(result: ReviewResult, blocked: bool, cfg: ReviewConfig) -> str:
-    prefix = f"[第{result.review_no}次] " if result.review_no else ""
-    if blocked:
-        counts = result.severity_counts
-        parts = ", ".join(
-            f"{c} {_severity_label(s)}" for s, c in sorted(counts.items(), reverse=True)
-        )
-        return f"{prefix}存在达到门禁级别({cfg.fail_on_severity})的问题: {parts}"
-    if result.has_issues:
-        return f"{prefix}审查通过(未达到门禁级别)"
-    return f"{prefix}审查通过,未发现问题"
-
-
-def _check_summary(result: ReviewResult, cfg: ReviewConfig) -> str:
-    counts = result.severity_counts
-    parts = ", ".join(f"{_severity_label(s)} {counts[s]}" for s in sorted(counts, reverse=True))
-    lines = [
-        f"- 问题统计: {parts}",
-        f"- 门禁线: {cfg.fail_on_severity}({_severity_label(cfg.fail_on_severity) if cfg.fail_on_severity else '不拦'})",
-        f"- 必修线: {cfg.require_fix_severity}({_severity_label(cfg.require_fix_severity)})",
-    ]
-    if result.quality_score is not None:
-        lines.append(f"- 质量评分: {result.quality_score:.0f}/100")
-    if result.skipped_files:
-        lines.append(f"- 跳过文件: {result.skipped_files}")
-    return "\n".join(lines)
 
 
 def _repo_from_env() -> str:
@@ -119,7 +71,7 @@ def _mode_from_event() -> str:
     return "reply" if event_name == "pull_request_review_comment" else "review"
 
 
-def _handle_reply_event(github: GitHubClient, llm: LLMClient) -> None:
+def _handle_reply_event(platform: ReviewPlatform, llm: LLMClient) -> None:
     """处理用户对 AI 审查评论的线程回复(简洁回答)。"""
     event_path = os.environ.get("GITHUB_EVENT_PATH", "")
     if not event_path or not Path(event_path).is_file():
@@ -129,7 +81,7 @@ def _handle_reply_event(github: GitHubClient, llm: LLMClient) -> None:
     comment = event.get("comment") or {}
     from .reply import ReplyHandler
 
-    if ReplyHandler(github=github, llm=llm).handle(comment):
+    if ReplyHandler(github=platform, llm=llm).handle(comment):
         logger.info("已回复线程评论 #%s", comment.get("id"))
     else:
         logger.info("无回复动作(非 AI 线程 / Bot 评论 / 非回复)")
@@ -149,8 +101,8 @@ def main() -> None:
 
     # 回复模式:不跑审查,只回应线程(简洁,无需 review 配置/上下文)
     if _mode_from_event() == "reply":
-        with GitHubClient(token=token, repo=repo, pr_number=pr_number) as github:
-            _handle_reply_event(github, llm)
+        with GitHubClient(token=token, repo=repo, pr_number=pr_number) as platform:
+            _handle_reply_event(platform, llm)
         return
 
     # 审查配置:.ai-review.yaml(默认仓库根)
@@ -166,9 +118,9 @@ def main() -> None:
     if context:
         logger.info("已收集仓库上下文: %d 字符", len(context))
 
-    with GitHubClient(token=token, repo=repo, pr_number=pr_number) as github:
+    with GitHubClient(token=token, repo=repo, pr_number=pr_number) as platform:
         runner = ReviewRunner(
-            github=github,
+            platform=platform,
             llm=llm,
             config=review_cfg,
             repo_root=repo_root,
@@ -179,8 +131,8 @@ def main() -> None:
         except ToolLoopError as e:
             # 工具循环超限(agentic 探索失控):发说明评论 + check neutral,不阻塞合并也不崩 workflow
             logger.error("工具循环超限: %s", e)
-            pr = github.get_pr_info()
-            github.post_review(
+            pr = platform.get_pr_info()
+            platform.post_review(
                 body=(
                     "⚠️ **本轮 AI 审查工具调用超限,未能完成审查**(已跳过质量门,不阻塞合并)。\n\n"
                     f"- `{e}`\n\n"
@@ -190,7 +142,7 @@ def main() -> None:
                 head_sha=pr.head_sha,
             )
             try:
-                github.create_check_run(
+                platform.create_check_run(
                     "AI Review",
                     head_sha=pr.head_sha,
                     conclusion="neutral",
@@ -202,14 +154,14 @@ def main() -> None:
             return
 
         # 评审次数: 已有 AI review 数 + 1(显示"第 N 次评审")
-        result.review_no = github.count_ai_reviews() + 1
+        result.review_no = platform.count_ai_reviews() + 1
 
         # 审查输出解析失败(2026-08-14 事故修复):发说明评论 + check neutral,绝不静默 pass
         if result.parse_errors:
-            pr = github.get_pr_info()
-            github.post_review(body=runner.format_parse_failed_comment(result), head_sha=pr.head_sha)
+            pr = platform.get_pr_info()
+            platform.post_review(body=runner.format_parse_failed_comment(result), head_sha=pr.head_sha)
             try:
-                github.create_check_run(
+                platform.create_check_run(
                     "AI Review",
                     head_sha=pr.head_sha,
                     conclusion="neutral",
@@ -223,10 +175,10 @@ def main() -> None:
 
         # 质量门降级(P1b):不发低质量审查,发说明评论(附 issues 摘要) + check neutral(不拦合并)
         if result.quality_verdict == "degraded":
-            pr = github.get_pr_info()
-            github.post_review(body=runner.format_degraded_comment(result), head_sha=pr.head_sha)
+            pr = platform.get_pr_info()
+            platform.post_review(body=runner.format_degraded_comment(result), head_sha=pr.head_sha)
             try:
-                github.create_check_run(
+                platform.create_check_run(
                     "AI Review",
                     head_sha=pr.head_sha,
                     conclusion="neutral",
@@ -247,21 +199,21 @@ def main() -> None:
 
         body = runner.format_comment(result)
         inline = runner.build_inline_comments(result)
-        pr = github.get_pr_info()
-        github.post_review(body=body, head_sha=pr.head_sha, comments=inline)
+        pr = platform.get_pr_info()
+        platform.post_review(body=body, head_sha=pr.head_sha, comments=inline)
 
         logger.info("行内评论线程: %d 条(其余问题在整体评论)", len(inline))
 
         # check-run 合并门禁:达到 fail_on_severity 门槛 → failure(check 红)
         # 注意:权限不足(旧 workflow 无 checks: write)时仅告警,不中断已发布的评论
-        blocked = _has_blocking_issues(review_cfg, result)
+        blocked = has_blocking_issues(review_cfg, result)
         try:
-            github.create_check_run(
+            platform.create_check_run(
                 "AI Review",
                 head_sha=pr.head_sha,
                 conclusion="failure" if blocked else "success",
-                title=_check_title(result, blocked, review_cfg),
-                summary=_check_summary(result, review_cfg),
+                title=check_title(result, blocked, review_cfg),
+                summary=check_summary(result, review_cfg),
             )
         except GitHubError as e:
             logger.warning("创建 check-run 失败(可忽略,评论已发布): %s", e)
