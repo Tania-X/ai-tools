@@ -43,7 +43,7 @@ from pr_review.local_platform import LocalPlatform  # noqa: E402
 from pr_review.review import ReviewRunner  # noqa: E402
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run AI review on a local git diff")
     parser.add_argument("--repo", default=".", help="local git repo path")
     parser.add_argument("--base", default="HEAD~1", help="base revision")
@@ -54,8 +54,11 @@ def main() -> None:
     parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL")
     parser.add_argument("--model", default=None, help="model name")
     parser.add_argument("--no-thinking", action="store_true", help="disable DeepSeek thinking mode")
-    args = parser.parse_args()
+    return parser
 
+
+def run_review(args: argparse.Namespace) -> int:
+    """执行一次本地 diff 审查(被 pr_review.cli 和 ai-tools-cli 共用)。"""
     # 显式 CLI 参数优先, 转成 gateway 可识别的环境变量
     if args.api_key:
         os.environ["AI_GATEWAY_API_KEYS"] = args.api_key
@@ -86,6 +89,12 @@ def main() -> None:
     )
     result = runner.run()
     print(runner.format_comment(result))
+    return 0
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    raise SystemExit(run_review(args))
 
 
 if __name__ == "__main__":

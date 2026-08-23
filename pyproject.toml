@@ -13,6 +13,9 @@ dependencies = [
     "ast-grep-py>=0.1",  # pr-review 的 agentic ast_grep 工具
 ]
 
+[project.scripts]
+ai-tools-cli = "ai_tools_cli.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
@@ -24,8 +27,8 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = [".", "pr-review", "golden-tests", "ci-diagnose"]
-include = ["gateway*", "pr_review*", "golden*", "ci_diagnose*"]
+include = ["gateway*", "pr_review*", "golden*", "ci_diagnose*", "ai_tools_cli*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["gateway/tests", "pr-review/tests", "ci-diagnose/tests", "golden-tests/tests"]
+testpaths = ["gateway/tests", "pr-review/tests", "ci-diagnose/tests", "golden-tests/tests", "ai_tools_cli/tests"]

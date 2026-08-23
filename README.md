@@ -103,6 +103,23 @@ jobs:
     # pricing-ttl-seconds: "3600"
 ```
 
+## CLI
+
+安装后可获得统一命令：
+
+```bash
+pip install -e .
+
+ai-tools-cli --help
+ai-tools-cli review --repo /path/to/repo --base main --head HEAD
+ai-tools-cli pricing show
+ai-tools-cli pricing refresh
+```
+
+当前子命令：
+- `review`：本地 git diff 审查（基于 LocalPlatform）
+- `pricing`：查看/刷新 DeepSeek 官方定价
+
 ## 文档索引
 
 - [审查引擎设计](docs/ai-review-architecture.md) · [质量门设计](docs/pr-review-quality-gate.md) · [评测方案](docs/golden-testing.md)
