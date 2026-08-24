@@ -57,6 +57,9 @@ class GoldenRunner:
                 # skip 场景可用 --resume 补跑
                 print(f"  [skip] {name} 网络失败: {type(e).__name__}")
                 result = {"case": name, "status": "skip", "reason": f"网络失败: {type(e).__name__}"}
+            # 能力/语言元数据(来自 manifest, 供报告按能力维度聚合)
+            result.setdefault("capability", entry.get("capability", ""))
+            result.setdefault("language", entry.get("language", ""))
             results.append(result)
             self._save_result(name, result)
 

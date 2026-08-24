@@ -172,3 +172,25 @@ def test_network_retry_then_success():
     result = api._get("/repos/x/y")
     assert result == {"ok": True}
     assert api._client.get.call_count == 2
+
+# ---------------------------------------------------------------- report 能力维度聚合(2026-08-24)
+def test_report_capability_aggregation():
+    results = [
+        {"case": "case-bug", "pass": True, "actual": {"total": 1}, "check_conclusion": "failure",
+         "capability": "bug", "language": "go"},
+        {"case": "case-security", "pass": True, "actual": {"total": 2}, "check_conclusion": "failure",
+         "capability": "security", "language": "go"},
+        {"case": "case-clean", "pass": False, "actual": {"total": 2},
+         "failures": ["报出被禁止的 4 级问题"], "capability": "no-false-positive", "language": "go"},
+        {"case": "case-bait", "status": "skip", "reason": "网络失败",
+         "capability": "no-false-positive", "language": "go"},
+        {"case": "case-severity-security", "pass": False, "actual": {"total": 1},
+         "failures": ["未命中期望级别"], "capability": "severity", "language": "go"},
+    ]
+    md = render_report(results, 0)
+    assert "## 能力维度" in md
+    assert "| bug | 1 | 1 | 100% |" in md
+    assert "| security | 1 | 1 | 100% |" in md
+    # skip 不计入能力聚合(no-false-positive 只有 case-clean 1 个)
+    assert "| no-false-positive | 0 | 1 | 0% |" in md
+    assert "| severity | 0 | 1 | 0% |" in md
