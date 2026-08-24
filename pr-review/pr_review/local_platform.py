@@ -11,7 +11,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .types import PRFile, PRInfo
+from .models import PRFile, PRInfo
 
 
 class LocalPlatform:

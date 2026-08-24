@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from .types import PRFile, PRInfo
+from .models import PRFile, PRInfo
 
 API_VERSION_HEADERS = {
     "Accept": "application/vnd.github+json",

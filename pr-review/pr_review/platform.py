@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from .types import PRFile, PRInfo
+from .models import PRFile, PRInfo
 
 
 @runtime_checkable

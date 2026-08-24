@@ -8,7 +8,7 @@ from gateway import ChatResponse
 
 from pr_review.config import QualityConfig, ReviewConfig
 from pr_review.review import ReviewRunner
-from pr_review.types import PRInfo
+from pr_review.models import PRInfo
 
 PR = PRInfo(
     number=10,

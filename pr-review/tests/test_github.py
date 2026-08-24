@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock
 
 from pr_review.github import GitHubClient
-from pr_review.types import PRFile
+from pr_review.models import PRFile
 
 
 def _client(reviews_per_page: list[list[dict]]):

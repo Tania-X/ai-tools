@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 
 from pr_review.local_platform import LocalPlatform
-from pr_review.types import PRFile
+from pr_review.models import PRFile
 
 
 def _git(repo, *args):

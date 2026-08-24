@@ -20,7 +20,7 @@ from .config import ReviewConfig
 from .diff import DiffHunk, FileDiff, parse_diff
 from .platform import ReviewPlatform
 from .prompt import build_messages, parse_review_json
-from .types import PRFile, PRInfo
+from .models import PRFile, PRInfo
 from .reply import RESOLUTION_MARK_RE
 from .repo_tools import TOOL_SCHEMAS, RepoTools
 
