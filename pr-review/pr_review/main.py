@@ -36,7 +36,7 @@ from pr_review.config import ReviewConfig  # noqa: E402
 from pr_review.context import ContextCollector  # noqa: E402
 from pr_review.github import GitHubClient, GitHubError  # noqa: E402
 from pr_review.output import check_summary, check_title, has_blocking_issues  # noqa: E402
-from pr_review.platform import ReviewPlatform  # noqa: E402
+from pr_review.review_platform import ReviewPlatform  # noqa: E402
 from pr_review.review import ReviewRunner, ToolLoopError  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

@@ -18,7 +18,7 @@ from gateway.otel import get_tracer
 
 from .config import ReviewConfig
 from .diff import DiffHunk, FileDiff, parse_diff
-from .platform import ReviewPlatform
+from .review_platform import ReviewPlatform
 from .prompt import build_messages, parse_review_json
 from .models import PRFile, PRInfo
 from .reply import RESOLUTION_MARK_RE

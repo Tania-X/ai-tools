@@ -17,7 +17,7 @@ from typing import Any
 from gateway import LLMClient
 
 from .github import REVIEW_MARKER
-from .platform import ReviewPlatform
+from .review_platform import ReviewPlatform
 from .prompt import build_reply_messages
 
 logger = logging.getLogger("pr_review.reply")
