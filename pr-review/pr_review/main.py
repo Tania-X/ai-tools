@@ -218,21 +218,35 @@ def main() -> None:
         except GitHubError as e:
             logger.warning("创建 check-run 失败(可忽略,评论已发布): %s", e)
 
+        counts = result.severity_counts
+        counts_str = ", ".join(f"{c}级×{n}" for c, n in sorted(counts.items(), reverse=True)) or "无"
         logger.info(
-            "PR #%s 审查完成: %d 个问题(error=%d warn=%d), %d 批, token=%d, cost=¥%.4f, blocked=%s",
+            "PR #%s 审查完成: %d 个问题(%s), %d 批, token=%d, cost=¥%.4f, blocked=%s",
             pr_number,
             len(result.issues),
-            result.severity_counts["error"],
-            result.severity_counts["warn"],
+            counts_str,
             result.batches,
             result.total_tokens,
             result.total_cost,
             blocked,
         )
 
+        _flush_otel()  # 确保 OTel span 在进程退出前导出(避免异常退出丢 trace)
+
         if blocked:
             logger.error("存在达到门禁级别(%s)的问题, job 判定失败", review_cfg.fail_on_severity)
             sys.exit(1)
+
+
+def _flush_otel() -> None:
+    """强制导出未落盘的 OTel span(进程退出前调用, 防止 BatchSpanProcessor 丢 trace)。"""
+    try:
+        from opentelemetry import trace as _trace
+        provider = _trace.get_tracer_provider()
+        if provider is not None and hasattr(provider, "shutdown"):
+            provider.shutdown()
+    except Exception:  # noqa: BLE001 可观测性失败不影响主流程
+        pass
 
 
 if __name__ == "__main__":
