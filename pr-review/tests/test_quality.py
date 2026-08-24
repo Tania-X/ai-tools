@@ -6,8 +6,14 @@ from gateway import ChatResponse
 
 from pr_review.config import QualityConfig, ReviewConfig
 from pr_review.quality import (
+    ACTION_DELETE,
+    ACTION_DOWNGRADE,
+    ACTION_KEEP,
+    IssueVerdict,
     Judge,
     build_judge_messages,
+    per_issue_verify,
+    sentinel_triggered,
     structural_signals,
 )
 from pr_review.review import ReviewIssue, ReviewResult, ReviewRunner
@@ -460,3 +466,56 @@ def test_sentinel_triggered_threshold():
 
     # 空列表不触发
     assert sentinel_triggered([]) is False
+
+
+# ---------------------------------------------------------------- 严重度高判降级(2026-08-24)
+def _hi(file="a.py", line=1, sev=4, category="other", trigger="", detail="d", evidence="e"):
+    return ReviewIssue(
+        file=file, line=line, severity=sev, title="t", detail=detail, suggestion="s",
+        category=category, evidence=evidence, trigger=trigger,
+    )
+
+
+def test_downgrade_convention_high_severity():
+    """case-severity-security 形态: 纯约定违反(category=convention)判 4 → 降级 3。"""
+    issue = _hi(sev=4, category="convention", detail="clearPolicy 返回 error 未处理",
+                evidence="策略清理失败会被静默掩盖, 造成数据不一致")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_DOWNGRADE
+    assert v.new_severity == 3
+
+
+def test_downgrade_hypothetical_wording():
+    """假设性措辞(万一/失败会)即使 category=bug 也降级。"""
+    issue = _hi(sev=4, category="bug", evidence="万一请求失败会导致连接池耗尽")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_DOWNGRADE and v.new_severity == 3
+
+
+def test_downgrade_trigger_hypothetical():
+    """LLM 自标 trigger=hypothetical + 4 级 → 降级 3。"""
+    issue = _hi(sev=4, trigger="hypothetical", evidence="若 X 失败则…")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_DOWNGRADE and v.new_severity == 3
+
+
+def test_real_security_bug_not_downgraded():
+    """真实安全 bug(SQL 注入, trigger=real, category=security)不降级。"""
+    issue = _hi(sev=5, category="security", trigger="real", detail="SQL 字符串拼接注入",
+                evidence="id 为用户输入直接拼接进 query")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_KEEP
+
+
+def test_real_bug_not_downgraded():
+    """真实 bug(nil 解引用, trigger=real)不降级。"""
+    issue = _hi(sev=5, category="bug", trigger="real", detail="getName 对 nil 解引用必然 panic")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_KEEP
+
+
+def test_convention_severity3_untouched():
+    """约定违反但 3 级(未超门禁)不动。"""
+    issue = _hi(sev=3, category="convention")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_KEEP

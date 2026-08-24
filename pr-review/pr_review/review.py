@@ -103,6 +103,10 @@ class ReviewIssue:
     category: str = "other"  # bug / security / convention / design_intent / resource / type_consistency / other
     evidence: str = ""       # 判断依据(引用代码/契约位置)
     needs_review: bool = False  # 需人工确认(设计意图类不确定判断,不计入门禁)
+    # 两轴事实原始值(2026-08-24 保留, 供质量门确定性降级用):
+    #   trigger: real / hypothetical / style; impact: fatal / functional / minor / none
+    trigger: str = ""
+    impact: str = ""
     # 同根因的多个位置(2026-08-14 合并契约): file+line 是主位置,
     # locations 列出其余位置; 为空时按单位置处理。
     locations: list[dict[str, Any]] = field(default_factory=list)
@@ -118,8 +122,10 @@ class ReviewIssue:
             if f and ln > 0:
                 locations.append({"file": f, "line": ln})
         # severity 解析优先级: trigger/impact 两轴事实(新格式) > severity 数字/旧字符串(兼容)
-        if "trigger" in d or "impact" in d:
-            severity = severity_from_facts(str(d.get("trigger", "")), str(d.get("impact", "")))
+        trigger = str(d.get("trigger", ""))
+        impact = str(d.get("impact", ""))
+        if trigger or impact:
+            severity = severity_from_facts(trigger, impact)
         else:
             severity = _clamp_severity(d.get("severity", 2))
         return cls(
@@ -132,6 +138,8 @@ class ReviewIssue:
             category=str(d.get("category", "other")),
             evidence=str(d.get("evidence", "")),
             needs_review=bool(d.get("needs_review", False)),
+            trigger=trigger,
+            impact=impact,
             locations=locations,
         )
 

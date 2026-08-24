@@ -107,13 +107,36 @@ def structural_signals(
     return signals
 
 
-_HYPOTHETICAL_MARKERS = ("若", "如果", "可能", "一旦", "假设", "失败时", "异常时", "hypothetical")
+_HYPOTHETICAL_MARKERS = (
+    "若", "如果", "可能", "一旦", "万一", "假设", "hypothetical",
+    "失败时", "异常时", "失败会", "若失败", "如果失败", "可能导致", "无法保证",
+)
 
 
 def _looks_hypothetical(issue: Any) -> bool:
-    """issue 的描述/依据是否呈假设性(高判风险信号, 供 judge 复核)。"""
+    """issue 的描述/依据是否呈假设性(高判风险信号, 供质量门降级与 judge 复核)。"""
     hay = f"{issue.detail} {issue.evidence} {issue.suggestion}"
     return any(m in hay for m in _HYPOTHETICAL_MARKERS)
+
+
+def _is_severity_high_judgement(issue: Any) -> bool:
+    """严重度高判判定(2026-08-24 三信号 OR, 零成本确定性规则):
+
+    severity ≥4(会拦合并, 最贵的误报) 且命中任一:
+      a. 文本呈假设性措辞(若…失败/可能/万一...)
+      b. LLM 自标 trigger=hypothetical(两轴事实)
+      c. 纯约定违反(category=convention): 策略锚点"明确约定违反=3", 不应到 4
+    命中 → 应由质量门降到 3(必修不阻塞)。
+    """
+    if int(getattr(issue, "severity", 0) or 0) < 4:
+        return False
+    if _looks_hypothetical(issue):
+        return True
+    if str(getattr(issue, "trigger", "") or "").strip().lower() == "hypothetical":
+        return True
+    if str(getattr(issue, "category", "") or "").strip().lower() == "convention":
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -184,12 +207,20 @@ def per_issue_verify(issues: list[Any], added_lines: dict[str, set[int]]) -> lis
             )
             continue
 
-        # 4. 假设性证据 + 高级别(≥4) → 降级到 3(必修不阻塞)
-        if sev >= 4 and _looks_hypothetical(issue):
+        # 4. 严重度高判(≥4, 会拦合并) → 降级到 3(必修不阻塞)
+        #    三信号: 假设性措辞 / trigger=hypothetical / category=convention(策略锚点约定违反=3)
+        if _is_severity_high_judgement(issue):
+            reason = f"严重度高判(级别 {sev} ≥4 会拦合并)"
+            if getattr(issue, "category", "") == "convention":
+                reason += ": 纯约定违反(策略锚点=3)"
+            elif _looks_hypothetical(issue):
+                reason += ": 证据/描述呈假设性故障"
+            elif getattr(issue, "trigger", "") == "hypothetical":
+                reason += ": LLM 自标 trigger=hypothetical"
+            reason += ", 降级到 3"
             verdicts.append(
                 IssueVerdict(issue=issue, action=ACTION_DOWNGRADE,
-                             reason=f"证据是假设性故障(若…失败/可能/如果)但级别为 {sev}(≥4 会拦合并), 降级到 3",
-                             new_severity=3)
+                             reason=reason, new_severity=3)
             )
             continue
 
