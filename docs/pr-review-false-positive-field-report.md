@@ -75,6 +75,26 @@
 | **E 判官故障** | judge 返回不可解析内容 → 0/100，整轮结论不可用 | judge 输出无 schema 强约束、无原始输出留档 | 解析失败：留档原文 + 重试一次（纯 JSON） + 计入健康度指标；对下游的影响面要明确（应只影响「质量评分」，不影响 issue 门禁） |
 | **F 标题与结论矛盾** | 标题说「被 400 处理器覆盖」，正文说「这一点没问题」 | 模型先写标题再自我修正，正文推翻标题 | 报告层做**标题/正文一致性**确定性校验：正文含「没问题/不成立/不构成」而标题为 defect → 降级为 comment |
 
+### 3.1 语言先验误读：用别的语言的直觉读 Python
+
+A–F 六类里，**有相当一部分的根因是「语言语义先验」**：模型把 Java / JS 的默认规则套到
+Python 上，而 Python 的规则恰好不同。单独列出来是因为它**可以被确定性手段挡住**
+（技术栈声明 + 语义检查清单 + 针对性 golden 用例），比「让模型更聪明」可靠得多。
+
+| 实例（本仓真实误报） | 模型套用的先验 | Python 实际规则 |
+|---|---|---|
+| R7 s4「领域错误会返回 500」 | Java：异常必须在**每个方法/路由**里被 try/catch，否则一路向上变成 500 | Python 允许**按类集中注册处理器**（`@app.exception_handler(X)`），Starlette 抛异常后沿 MRO 找最精确的处理器 → `DomainError→400` 已覆盖 |
+| R7 s5「空 `data_sources` 被丢弃」 | JS：`[]` 与 `{}` 都 falsy，`if (filters)` 会跳过 | Python 真值判断看**容器是否非空**：`{"data_sources": []}` 是**非空 dict** → `if filters:` 为真 → 请求体带上了 filters |
+| R1 s4「未传 `base_url` 会打到硬编码 localhost」 | Java：无参构造 = 用默认常量 | Python 的 `x or default` 惯用法里 default 是**从配置读**的（`settings.openrag_base_url`） |
+| R1 s4「`await` 在 `with` 块内 = 文件先被删除」 | Java：`try-with-resources` 关闭时机与内部调用交错 | 需要实际执行 `with` 语句的语义：块内 `await` 完成后才 `__exit__`，`delete=True` 是关闭时 unlink |
+| R8 s4「`PermissionDeniedError` 被 `DomainError` 处理器覆盖成 400」 | Java：`catch` 顺序敏感、父类在前会遮蔽子类 | Starlette 处理器查找**顺序无关**、按 MRO 取最精确；模型自己的正文也写了「这一点没问题」（→ 同时属 F 类） |
+| R6 s4「非法 `tenant_id` 会 500」 | Java/Scala：值对象的构造器会校验并抛异常 | 普通 `@dataclass(frozen=True)` **不校验**；`TenantId("abc")` 合法，查不到只是 404 |
+| R2 s3「迁移用 `asynccontextmanager(get_session)` 包裹」 | Java：无对应概念，看起来像多余包装 | `get_session` 是 **async generator**，`async with get_session()` 直接 `TypeError`，包一层是必需的 |
+| 测试辅助函数传错类型（我实际写出的 bug：`role_id=role` 应为 `role.id`） | Java：编译期就会报类型不匹配 | Python 动态类型，错类型延迟到运行时才炸 → **缺静态检查时，评审被迫兼职编译器**，而它对动态类型的判断并不可靠 |
+
+> 归纳：**误报高发区 = 「正确的 Python 代码 + 与 Java/JS 直觉相反的语言规则」**。
+> 这类误报不会因为模型变大而消失，应该用规则与用例固化掉。
+
 ## 4. 现有机制为何没拦住（逐条对照）
 
 | 已有机制 | 状态 | 缺口 |
@@ -123,6 +143,24 @@
   失败计数进入统计 footer；明确**不改变 issue 门禁**（评分与门禁解耦）
 - 为什么有效：2/15 轮整体判断不可用，是「整轮浪费」而不是单条噪音
 
+### P0-4 技术栈声明 + 语言语义确定性检查（命中 §3.1 全部实例）
+
+- 落点：`pr-review/pr_review/config.py`（新增 `stack` / `stack_notes`，可由仓库声明，也可从 diff 后缀推断）
+  + `pr_review/prompt.py`（注入一段「语言语义提醒」）+ `golden-tests`（新增语言陷阱用例集）
+- 做法：
+  ```text
+  1. 在 prompt 里声明技术栈（language / framework / async runtime），并附上高发语义清单：
+     Python: 真值判断（非空容器为真）、异常可按类集中注册（框架级 handler 沿 MRO 匹配）、
+             async with / async generator 的生命周期、dataclass 不校验、动态类型无编译期检查
+  2. 断言「违反语言语义」的 finding 必须附语义依据（引用规则或可复现片段），
+     否则按 P0-1 的可验证性规则降级
+  3. golden-tests 增加 case-semantics-*：代码正确但极易被跨语言直觉误报的样本
+     （空容器真值、框架级异常映射、async generator、dataclass default_factory、`x or default` 读配置）
+  ```
+- 代价：配置项 + 一段 prompt 文本 + 4~6 个 golden 用例
+- 为什么有效：§3.1 那 8 个实例全部落在同一模式里，属于**可用规则消灭**的误报类别；
+  同时它能减少「同一断言跨轮升级」（C 类）——因为语义争议一次就被解决
+
 ### P1-1 上下文分级注入（命中 D）
 
 - 落点：`pr_review/config.py::context_files`（支持权重/单文件上限）+ `context.py` 采集顺序
@@ -168,6 +206,7 @@
 | 跨轮同断言升级 | 同一指纹在不同轮次提高 severity 的次数 | 1 / 15 轮 | 0 |
 | judge 解析失败率 | 解析失败轮次 / 总轮次 | 2 / 15（13%） | 0，且失败时不影响 issue 门禁 |
 | 逃逸缺陷 | 合并后才发现的真实缺陷 | 0 | 保持 0 |
+| 语言先验误报 | §3.1 中「正确 Python 代码被按他语言规则判错」的条数 | 8 / 15 轮中出现（跨 4 个类别） | ≤ 1，靠 P0-4 的规则与用例收敛 |
 
 回归方式：
 - 合成侧：`golden-tests` 现有 precision/recall 保留；新增 `case-invariant`（声明不变量、diff 未违反 → 必须 0 误报）与 `case-repeat-claim`（同一 PR 两轮，第二轮必须不重复升级）
@@ -196,7 +235,8 @@
 ## 9. 待用户拍板的落地顺序
 
 ```text
-第一批（改动小、直接命中 53% 里的 6 条）：P0-1 可验证性字段、P0-3 判官故障留档
+第一批（改动小、直接命中 53% 里的 6 条）：P0-1 可验证性字段、P0-3 判官故障留档、
+        P0-4 技术栈声明 + 语言语义检查（§3.1 的 8 个实例全部命中）
 第二批（需要状态设计）：P0-2 声明台账与跨轮指纹
 第三批（需要仓库侧配合）：P1-1 上下文分级、P1-2 不变量清单、P1-3 判定回流
 第四批（成本/体验）：P2-1 健康度 footer、P2-2 轮次预算与增量审
