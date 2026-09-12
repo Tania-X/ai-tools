@@ -14,6 +14,27 @@ def severity_label(sev: int) -> str:
     return SEVERITY_META.get(sev, SEVERITY_META[2])["name"]
 
 
+def split_counts(result: ReviewResult) -> tuple[dict[int, int], dict[int, int]]:
+    """按“是否计入门禁”拆分问题计数: (计入门禁的, 仅需人工确认的)。
+
+    门禁只看 `not issue.needs_review` 的问题;但标题/统计若把两类混在一起, 就会出现
+    “标题写通过、统计却有严重 1” 的自相矛盾(2026-09-11 真实误判: 一条被标记
+    “⚠️ 需人工确认” 的严重级问题不计入门禁, 统计却仍显示“严重 1”)。
+    """
+    blocking: dict[int, int] = {}
+    manual: dict[int, int] = {}
+    for issue in result.issues:
+        bucket = manual if issue.needs_review else blocking
+        bucket[issue.severity] = bucket.get(issue.severity, 0) + 1
+    return blocking, manual
+
+
+def _format_counts(counts: dict[int, int]) -> str:
+    return ", ".join(
+        f"{counts[s]} {severity_label(s)}" for s in sorted(counts, reverse=True)
+    )
+
+
 def has_blocking_issues(cfg: ReviewConfig, result: ReviewResult) -> bool:
     """是否达到合并门禁(fail_on_severity)级别的问题。
 
@@ -31,25 +52,45 @@ def has_blocking_issues(cfg: ReviewConfig, result: ReviewResult) -> bool:
 
 def check_title(result: ReviewResult, blocked: bool, cfg: ReviewConfig) -> str:
     prefix = f"[第{result.review_no}次] " if result.review_no else ""
+    blocking, manual = split_counts(result)
     if blocked:
-        counts = result.severity_counts
-        parts = ", ".join(
-            f"{c} {severity_label(s)}" for s, c in sorted(counts.items(), reverse=True)
+        # Count only what actually tripped the gate, so the title matches the verdict.
+        return (
+            f"{prefix}存在达到门禁级别({cfg.fail_on_severity})的问题: "
+            f"{_format_counts(blocking)}"
         )
-        return f"{prefix}存在达到门禁级别({cfg.fail_on_severity})的问题: {parts}"
     if result.has_issues:
-        return f"{prefix}审查通过(未达到门禁级别)"
+        # Say WHY the gate passed: issues that need a human are excluded by design.
+        reason = _format_counts(blocking) or "无"
+        if manual:
+            return (
+                f"{prefix}审查通过(未达到门禁级别): 计入门禁 {reason}; "
+                f"需人工确认(不计入门禁) {_format_counts(manual)}"
+            )
+        return f"{prefix}审查通过(未达到门禁级别): 计入门禁 {reason}"
     return f"{prefix}审查通过,未发现问题"
 
 
 def check_summary(result: ReviewResult, cfg: ReviewConfig) -> str:
-    counts = result.severity_counts
-    parts = ", ".join(f"{severity_label(s)} {counts[s]}" for s in sorted(counts, reverse=True))
+    blocking, manual = split_counts(result)
+    parts_list: list[str] = []
+    if blocking:
+        parts_list.append(
+            ", ".join(f"{severity_label(s)} {blocking[s]}" for s in sorted(blocking, reverse=True))
+        )
+    if manual:
+        parts_list.append(
+            ", ".join(f"{severity_label(s)} {manual[s]}(需人工确认)" for s in sorted(manual, reverse=True))
+        )
+    parts = ", ".join(parts_list)
     lines = [
-        f"- 问题统计: {parts}",
+        f"- 问题统计: {parts or '无'}",
+        f"- 计入门禁: {_format_counts(blocking) or '无'}",
         f"- 门禁线: {cfg.fail_on_severity}({severity_label(cfg.fail_on_severity) if cfg.fail_on_severity else '不拦'})",
         f"- 必修线: {cfg.require_fix_severity}({severity_label(cfg.require_fix_severity)})",
     ]
+    if manual:
+        lines.append("- 说明: 「需人工确认」的问题按仓库约定不计入门禁, 不会阻塞合并")
     if result.quality_score is not None:
         lines.append(f"- 质量评分: {result.quality_score:.0f}/100")
     if result.skipped_files:

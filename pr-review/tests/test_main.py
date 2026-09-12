@@ -84,6 +84,37 @@ def test_check_summary_contains_stats():
     assert "门禁线: 4" in summary and "必修线: 3" in summary
 
 
+# ------------------------------------------------- 门禁 vs 需人工确认的展示一致性
+def test_gate_passes_for_needs_review_issue_but_reports_why():
+    """回归(2026-09-11): 标题曾写“通过”而统计仍显示“严重 1”，看起来自相矛盾。"""
+    cfg = ReviewConfig(fail_on_severity=4)
+    r = _result(_issue("error", needs_review=True))
+    assert not has_blocking_issues(cfg, r)
+    title = check_title(r, False, cfg)
+    assert "未达到门禁级别" in title
+    assert "需人工确认" in title and "不计入门禁" in title
+    summary = check_summary(r, cfg)
+    assert "需人工确认" in summary
+    assert "计入门禁: 无" in summary
+
+
+def test_blocked_title_counts_only_gate_issues():
+    """门禁标题只统计真正拦合并的问题, 不把需人工确认的算进去。"""
+    cfg = ReviewConfig(fail_on_severity=4)
+    r = _result(_issue("error"), _issue("error", needs_review=True))
+    assert has_blocking_issues(cfg, r)
+    title = check_title(r, True, cfg)
+    assert "1 严重" in title and "2 严重" not in title
+
+
+def test_passed_title_without_manual_issues_has_no_manual_noise():
+    cfg = ReviewConfig(fail_on_severity=4)
+    r = _result(_issue("warn"))
+    title = check_title(r, False, cfg)
+    assert "未达到门禁级别" in title
+    assert "需人工确认" not in title
+
+
 # ---------------------------------------------------------------- severity 统计
 def test_severity_counts():
     r = _result(_issue("error"), _issue("warn"), _issue("info"), _issue("warn"))
