@@ -76,6 +76,7 @@ def test_load_config_quality_gate(tmp_path):
         "quality_gate:\n"
         "  enabled: false\n"
         "  judge_model: deepseek-r1\n"
+        "  judge_provider: deepseek\n"
         "  pass_score: 60\n"
         "  max_rewrites: 2\n"
         "  lint_enabled: true\n",
@@ -85,6 +86,7 @@ def test_load_config_quality_gate(tmp_path):
     qg = cfg.quality_gate
     assert qg.enabled is False
     assert qg.judge_model == "deepseek-r1"
+    assert qg.judge_provider == "deepseek"
     assert qg.pass_score == 60
     assert qg.max_rewrites == 2
     assert qg.lint_enabled is True
