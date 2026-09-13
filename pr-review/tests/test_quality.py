@@ -1019,3 +1019,94 @@ def test_r4_1_path_detector_shape():
     assert not hit("未新增 test_ 用例")
     assert not hit("没有 tests/ 目录")
     assert not hit("pytest 用例拿不出来")
+
+# ---------------------------------------------------------------- 哨兵轮复核(决策 A, 2026-09-13)
+def _fatal_issue_json(title="哨兵前的问题"):
+    """trigger=real + impact=fatal → 5 级; 再配自认推演的 verification → 会被确定性降级。"""
+    return (
+        '{"file": "src/a.py", "line": 1, "severity": "fatal", "title": "' + title + '",'
+        ' "detail": "d", "suggestion": "s", "evidence": "a.py:1",'
+        ' "verification": "none: 属推演", "trigger": "real", "impact": "fatal"}'
+    )
+
+
+def test_sentinel_rewrite_is_reviewed_by_judge():
+    """哨兵整批重写后必须继续过 judge: 重写产物不能再"未经复核就判 pass"。
+
+    修复前: 哨兵重写 → 直接 `quality_verdict = "pass"` 并 return, 评论里连质量评分都没有。
+    """
+    from pr_review.quality import JudgeResult
+
+    responses = [
+        ChatResponse(content='{"summary": "s", "issues": [' + _fatal_issue_json() + "]}",
+                     model="m", provider="p", usage={}),
+        # 重写轮产物: 3 级问题(不会被确定性规则处理 → 不会再次触发哨兵)
+        ChatResponse(
+            content='{"summary": "s2", "issues": [{"file": "src/a.py", "line": 1,'
+                    ' "severity": "warn", "title": "重写后的问题", "detail": "d",'
+                    ' "suggestion": "s", "evidence": "a.py:1", "trigger": "real", "impact": "minor"}]}',
+            model="m", provider="p", usage={},
+        ),
+    ]
+    runner, _, llm = _quality_runner(responses)
+
+    seen: list[list[str]] = []
+
+    def fake_eval(result, diff_text):
+        seen.append([i.title for i in result.issues])
+        return JudgeResult(score=85, verdict="pass", reasons=[])
+
+    with patch("pr_review.quality.Judge.evaluate", side_effect=fake_eval):
+        result = runner.run()
+
+    assert result.rewrites == 1, "哨兵应触发一次整批重写"
+    assert len(seen) == 1, "哨兵重写后 judge 必须被调用一次"
+    assert seen[0] == ["重写后的问题"], "judge 复核的应是重写后的产物, 不是哨兵前那批"
+    assert result.quality_verdict == "pass"
+    assert result.quality_score == 85.0, "评分应来自 judge(修复前这里没有评分)"
+    assert llm.chat.call_count == 2
+
+
+def test_sentinel_plus_judge_respects_rewrite_budget():
+    """哨兵消耗的重写次数要计入 max_rewrites, judge 阶段的追加重写不能突破上限。"""
+    from pr_review.quality import JudgeResult
+
+    issue = _fatal_issue_json()
+    responses = [
+        ChatResponse(content='{"summary": "s", "issues": [' + issue + "]}",
+                     model="m", provider="p", usage={})
+        for _ in range(6)
+    ]
+    runner, _, llm = _quality_runner(responses)
+
+    with patch("pr_review.quality.Judge.evaluate",
+               side_effect=lambda r, d: JudgeResult(score=30, verdict="rewrite", reasons=["差"])):
+        result = runner.run()
+
+    # 1(哨兵) + 2(judge 阶段剩余预算) = 3 = max_rewrites 默认值
+    assert result.rewrites == 3, f"总重写次数不得突破 max_rewrites, 实际 {result.rewrites}"
+    assert result.quality_verdict == "degraded"
+    assert llm.chat.call_count == 4      # 原审 + 3 次重写
+
+
+def test_no_sentinel_keeps_judge_behaviour_unchanged():
+    """反向守卫: 哨兵未触发时, judge 行为与重写预算不受影响(不能改成"永远先重写一轮")。"""
+    from pr_review.quality import JudgeResult
+
+    responses = [
+        ChatResponse(
+            content='{"summary": "s", "issues": [{"file": "src/a.py", "line": 1,'
+                    ' "severity": "warn", "title": "普通问题", "detail": "d", "suggestion": "",'
+                    ' "evidence": "a.py:1", "trigger": "real", "impact": "minor"}]}',
+            model="m", provider="p", usage={},
+        )
+        for _ in range(2)
+    ]
+    runner, _, llm = _quality_runner(responses)
+    judge_results = iter([JudgeResult(score=50, verdict="rewrite", reasons=["x"]),
+                          JudgeResult(score=88, verdict="pass", reasons=[])])
+    with patch("pr_review.quality.Judge.evaluate", side_effect=lambda r, d: next(judge_results)):
+        result = runner.run()
+    assert result.rewrites == 1 and result.quality_verdict == "pass"
+    assert result.quality_score == 88.0
+    assert llm.chat.call_count == 2
