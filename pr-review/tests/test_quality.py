@@ -845,3 +845,95 @@ def test_r1_2_convention_precedence_is_documented_choice():
 
     issue = _gate(sev=4, verification="none: 属推演", evidence="约定违反", category="convention")
     assert _high_judgement(issue) == (3, "convention")
+
+
+# ---------------------------------------------------------------- 评审 R2 回归(2026-09-13)
+def test_r2_1_path_beats_generic_marker():
+    """R2-1 回归: 给出具体路径时, 通用标记词(n/a)与补充说明都不能把它判成推演。
+
+    评审给的原始例子: "n/a 不适用, 复现: POST /api/x …" 与 "N/A 见 tests/test_x.py::test_y"
+    在修复前会命中头部窗口里的 n/a → 降到 2 → 解除合并阻塞(方向反了)。
+    """
+    for text in (
+        "n/a 不适用, 复现: POST /api/x 传 tenant_id=abc 返回 500",
+        "N/A 见 tests/test_x.py::test_y",
+        "无法验证并发场景, 但可复现: POST /api/x 返回 500",
+        "该分支无测试覆盖, 参考 `pytest tests/test_x.py -k y`",
+    ):
+        issue = _gate(sev=4, verification=text, evidence="x.py:9 直接取 body['tenant_id']")
+        v = per_issue_verify([issue], {"a.py": {1}})[0]
+        assert v.action == ACTION_KEEP, f"{text} 给出了路径, 不该被判成推演"
+
+
+def test_r2_1_bare_escape_hatch_still_speculative():
+    """R2-1 反向守卫: 整条就是逃生口(短形式)仍要判推演, 修复不能把功能修没。"""
+    for text in ("none: 属推演", "n/a", "N/A 不适用"):
+        v = per_issue_verify([_gate(sev=4, verification=text)], {"a.py": {1}})[0]
+        assert v.action == ACTION_DOWNGRADE and v.new_severity == 2, f"{text} 仍应算推演"
+
+
+def test_r2_1_tail_positioned_self_admission_without_path_is_caught():
+    """R2-1: 没给路径、自认写在句子后面的, 仍要判推演。
+
+    这正是删掉"头部窗口"的理由: 那个窗口会漏掉这类自认(它只在开头 24 字里找标记词),
+    而路径优先判定已经解决了窗口当初要解决的问题。
+    """
+    issue = _gate(sev=4, verification="该分支未见用例, 具体行为无法验证, 只能推测")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
+
+
+def test_r2_1_speculation_without_any_path_still_caught():
+    """R2-1 反向守卫: 拿不出路径的自认(提了工具名但没有具体用例)仍要判推演。"""
+    issue = _gate(sev=4, verification="无法给出可复现的 pytest 用例, 只能由语言先验推断")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
+
+
+def test_r2_1_path_detector_is_not_triggered_by_prose():
+    """R2-1 反向守卫: 纯叙述性文字不能被当成"具体路径"(否则规则失效)。"""
+    from pr_review.quality import _looks_like_verification_path
+
+    assert not _looks_like_verification_path("看起来不太对, 属于推测")
+    assert not _looks_like_verification_path("无法验证: 该场景难以构造")
+    assert _looks_like_verification_path("pytest tests/test_x.py::test_y")
+    # 只有 _PATH_SIGNALS 能抓到的形态(无扩展名): 防"信号表被写空也全绿"
+    assert _looks_like_verification_path("见 tests/conftest::fixture 的构造")
+    assert _looks_like_verification_path("POST /api/x 传 tenant_id=abc")
+
+
+def test_r2_2_retry_does_not_append_second_user_message():
+    """R2-2 回归: 重试只能有一条连续的 user 消息(部分 provider 要求角色交替, 否则 400)。"""
+    from pr_review.quality import Judge
+
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(content="没有 JSON", model="m", provider="p", usage={}),
+        ChatResponse(content='{"score": 80, "verdict": "pass", "reasons": []}',
+                     model="m", provider="p", usage={}),
+    ]
+    jr = Judge(llm=llm, config=QualityConfig(pass_score=70)).evaluate(
+        ReviewResult(added_lines={}), "diff"
+    )
+    assert jr.parse_failed is False
+    retry_messages = llm.chat.call_args_list[1][0][0]
+    roles = [m["role"] for m in retry_messages]
+    assert "user user" not in " ".join(roles), f"出现连续两条 user: {roles}"
+    assert roles.count("user") == 1
+    assert "只输出一个 JSON" in retry_messages[-1]["content"]  # 指令并入最后一条 user
+
+
+def test_r2_2_retry_call_failure_is_a_judge_fault_not_a_crash():
+    """R2-2 回归: 重试调用本身抛异常(如 provider 400) → 按判官故障返回, 不冒泡打断审查。"""
+    from pr_review.quality import Judge
+
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(content="没有 JSON", model="m", provider="p", usage={}),
+        RuntimeError("400 Bad Request: roles must alternate"),
+    ]
+    jr = Judge(llm=llm, config=QualityConfig(pass_score=70)).evaluate(
+        ReviewResult(added_lines={}), "diff"
+    )
+    assert jr.parse_failed is True
+    assert jr.raw == "没有 JSON"     # 兜底时留档的是首次输出(唯一拿到的那次)

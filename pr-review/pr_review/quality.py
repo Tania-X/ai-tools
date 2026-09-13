@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -90,10 +91,20 @@ class Judge:
             "judge 输出无法解析, 重试一次(原文前 200 字): %s",
             (resp.content or "")[:200],
         )
-        retry_messages = messages + [
-            {"role": "user", "content": RETRY_JSON_INSTRUCTION},
+        # R2-2(评审第 2 轮): 不能直接 append 第二条 user 消息——部分 provider(Anthropic 格式
+        # 端点)要求 user/assistant 交替, 连续两条 user 会被 400 拒掉; 故并入最后一条 user 消息。
+        retry_messages = messages[:-1] + [
+            {
+                "role": "user",
+                "content": (messages[-1]["content"] if messages else "")
+                + "\n\n" + RETRY_JSON_INSTRUCTION,
+            },
         ]
-        retry = self.llm.chat(retry_messages, **kwargs)
+        try:
+            retry = self.llm.chat(retry_messages, **kwargs)
+        except Exception as e:  # noqa: BLE001 重试失败按"判官故障"处理, 不冒泡打断整轮审查
+            logger.error("judge 重试调用失败, 按判官故障处理: %s", e)
+            return parsed
         parsed_retry = self._parse(retry.content)
         if not parsed_retry.parse_failed:
             logger.info("judge 严格重试成功")
@@ -181,30 +192,48 @@ def _looks_hypothetical(issue: Any) -> bool:
 
 # P0-1: verification 里"自认可验证路径属推演"的标记词
 _SPECULATION_MARKERS = (
-    "推演", "推测", "无法验证", "无验证路径", "猜测", "n/a",
+    "推演", "推测", "无法验证", "无验证路径", "猜测",
+    # 同义的自认说法(2026-09-13 评审 R2: 只覆盖"无法验证"会漏掉这些常见写法)
+    "无法给出", "无法提供", "拿不出", "无法复现", "无复现路径",
 )
-# 英文逃生口 "none" 只认短形式(文档约定为 "none: 属推演")
+# 具体验证路径的特征(2026-09-13 评审 R2-1): 只要 verification 里给出了**具体可复现的东西**,
+# 就不能再判成"自认推演"——一个通用词(如 n/a)或一句补充说明, 不能盖过已经给出的路径。
+# 方向性理由: 误判成推演会降到 2 并解除阻塞, 属"把真问题放走"; 反之只是多留一条问题。
+_PATH_SIGNALS = ("::", "tests/", "test_", "http://", "https://")
+_PATH_PATTERNS = (
+    re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+/", re.I),
+    re.compile(r"`[^`]{3,}`"),                       # 反引号里的命令/片段
+    re.compile(r"\b[\w-]+\.(py|js|ts|go|java|rb|sh)\b"),  # 具体文件
+)
+
+
+def _looks_like_verification_path(v: str) -> bool:
+    """verification 里是否已给出具体可复现的东西(pytest 节点 id / 命令 / 具体文件 / 请求)。"""
+    if any(sig in v for sig in _PATH_SIGNALS):
+        return True
+    return any(pat.search(v) for pat in _PATH_PATTERNS)
+# 逃生口 "none" / "n/a" 只认短形式(文档约定为 "none: 属推演")
 _MAX_NONE_FORM_LEN = 20
-# 标记词只在**开头窗口**内生效(2026-09-13 评审 R1-1 修复)。
-# 理由: 给了真实复现路径的 verification 常在**后半句**补充"并发场景无法验证",
-# 若整条文本做子串匹配, 这类真问题会被误判成"自认推演"并降到 2(解除阻塞)——那正是
-# P0-1 想避免的方向。约定格式是"模式先行"(① 复现路径 ② 测试名 ③ none: 属推演),
-# 所以只看开头这段"模式声明区"足够, 且不会误伤后半句的补充说明。
-_SPECULATION_HEAD_CHARS = 24
-
-
 def _verification_is_speculative(issue: Any) -> bool:
     """LLM 是否在 verification 里自认"拿不出验证路径"(P0-1 的确定性止损口)。
 
-    只认两种形态: ① 短形式的 none 逃生口; ② 开头窗口内出现推演类标记词。
+    判定顺序(两条规则, 不再有"头部窗口"这种第三条):
+      ① 已给出具体路径(节点 id / 命令 / 文件 / 请求) → 不算推演(路径优先)
+      ② 短形式逃生口("none…" / "n/a…")              → 算推演
+      ③ 文本里出现推演类标记词                        → 算推演
+
+    演进说明(2026-09-13): R1 曾用"只看开头 24 字"来避免"路径 + 后半句补充说明"被误判。
+    R2 引入路径优先判定后, 头部窗口变成多余且有害(会漏掉"无路径但把自认写在后面"的情况),
+    故删除——现在只有"有没有给出具体路径"一个判据。
     """
     v = str(getattr(issue, "verification", "") or "").strip().lower()
     if not v:
         return False
-    if v.startswith("none") and len(v) <= _MAX_NONE_FORM_LEN:
+    if _looks_like_verification_path(v):
+        return False
+    if v.startswith(("none", "n/a")) and len(v) <= _MAX_NONE_FORM_LEN:
         return True
-    head = v[:_SPECULATION_HEAD_CHARS]
-    return any(m in head for m in _SPECULATION_MARKERS)
+    return any(m in v for m in _SPECULATION_MARKERS)
 
 
 def _has_no_basis(issue: Any) -> bool:
