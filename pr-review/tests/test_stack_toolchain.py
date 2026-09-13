@@ -7,7 +7,7 @@
 3. 确定性规则: 机器已确认的维度上仍报问题却不说明工具缺口 → 降级(不阻塞)
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -281,3 +281,88 @@ def test_p05_mapping_entries_are_actionable(category, dimension):
     """映射表里每一项都必须能配上声明的工具, 否则规则永远不生效(空转)。"""
     cfg = _tc_cfg()
     assert cfg.toolchain.tool_for_dimension(dimension), f"{category}→{dimension} 无对应工具"
+
+
+# --------------------------------------------------------------- P0-5 事实的跨轮传播(评审 R1-1)
+def _p05_runner(issues: list[dict], rounds: int = 2, check_conclusion: str = "success"):
+    """构造带工具链声明的 runner: 平台返回成功的 check, LLM 产出指定 issues。"""
+    import json as _json
+
+    from gateway import ChatResponse
+
+    issues_json = _json.dumps({"summary": "s", "issues": issues}, ensure_ascii=False)
+    llm = MagicMock()
+    llm.config.get.return_value = MagicMock(model="m")
+    llm.chat.side_effect = [
+        ChatResponse(content=issues_json, model="m", provider="p", usage={})
+        for _ in range(rounds)
+    ]
+    platform = MagicMock()
+    platform.get_pr_info.return_value = PRInfo(
+        number=1, title="t", body="", head_sha="abc", head_ref="f", base_ref="main"
+    )
+    platform.get_pr_files.return_value = [{
+        "filename": "src/a.py", "status": "modified",
+        "patch": "@@ -1,1 +1,2 @@\n+def foo():\n+    pass",
+    }]
+    platform.get_check_runs.return_value = [
+        {"name": "Type check (mypy)", "conclusion": check_conclusion, "status": "completed"}
+    ]
+    # 注意: 必须把上面这个带了 side_effect 的 llm 交给 runner — 早先这里误用了 _runner()
+    # 另建的裸 MagicMock, 于是拿不到 JSON、进入工具循环, 测试假失败(自己踩过的坑)
+    return ReviewRunner(platform=platform, llm=llm, config=_tc_cfg()), platform
+
+
+def test_p05_verified_dimensions_survive_judge_rewrite_round():
+    """评审 R1-1 回归: 重写轮必须继承"机器已确认维度", 否则 judge 的 P0-5 信号在重写轮消失。
+
+    (评审把影响面写成"规则 4c 也失效"是不准的——4c 读的是 review 里的缓存;
+    真正丢的是喂给 judge 的 structural_signals, 这条用例锁的就是那个通道。)
+    """
+    from pr_review.quality import JudgeResult
+
+    runner, _ = _p05_runner([{
+        "file": "src/a.py", "line": 1, "severity": "warn", "title": "A",
+        "detail": "", "suggestion": "", "category": "bug",
+    }])
+
+    seen: list[dict[str, str]] = []
+
+    def fake_eval(result, diff_text):
+        seen.append(dict(getattr(result, "verified_dimensions", {}) or {}))
+        if len(seen) == 1:
+            return JudgeResult(score=50, verdict="rewrite", reasons=["噪音"])
+        return JudgeResult(score=85, verdict="pass", reasons=[])
+
+    with patch("pr_review.quality.Judge.evaluate", side_effect=fake_eval):
+        result = runner.run()
+
+    assert len(seen) == 2, f"应发生一次重写(judge 两轮), 实际 {len(seen)}"
+    assert seen[0] == {"typing": "mypy"}
+    assert seen[1] == {"typing": "mypy"}, "重写轮丢失了机器事实"
+    assert result.verified_dimensions == {"typing": "mypy"}   # 最终结果也带着
+
+
+def test_p05_verified_dimensions_survive_sentinel_rewrite():
+    """评审 R1-1 回归(哨兵路径): 逐条验证触发整批重写时, 新 result 也要继承事实。"""
+    runner, _ = _p05_runner([{
+        "file": "src/a.py", "line": 1, "severity": "warn", "title": "类型不一致",
+        "detail": "标注 str 却传 int", "suggestion": "",
+        "category": "type_consistency", "evidence": "a.py:1 标注 str",
+    }])
+    result = runner.run()
+
+    # type_consistency 落在已确认的 typing 维度且未说明工具缺口 → 降级 → 1/1 触发哨兵
+    assert result.rewrites == 1, "哨兵应触发一次整批重写"
+    assert result.verified_dimensions == {"typing": "mypy"}, "哨兵重写轮丢失机器事实"
+
+
+def test_p05_rule_uses_single_source_of_truth():
+    """回归守卫: 质量门不得绕开 result 自己重算事实(否则"重写轮丢事实"只在一侧暴露)。"""
+    import inspect
+
+    from pr_review import review as review_mod
+
+    src = inspect.getsource(review_mod.ReviewRunner._quality_loop_inner)
+    assert "verified_dimensions=result.verified_dimensions" in src
+    assert "_verified_dimension_tools(pr)" not in src

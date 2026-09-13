@@ -417,9 +417,11 @@ class ReviewRunner:
         # ── 逐条验证层(2026-08-20 改造, 建议 1): 零成本确定性先处理 ──
         # 对的不动, 错的单独处理(删除幻觉/降级高判/修正越界), 不整批重写。
         if result.issues:
+            # P0-5 单一真源: 事实取自 result.verified_dimensions(_run_inner 里算一次),
+            # 与 judge 信号读同一份; 两处各自重算会让"重写轮丢事实"这类问题只在一侧暴露
             verdicts = per_issue_verify(
                 result.issues, result.added_lines,
-                verified_dimensions=self._verified_dimension_tools(pr),
+                verified_dimensions=result.verified_dimensions,
             )
             touched = sum(1 for v in verdicts if v.action != "keep")
             if touched:
@@ -442,6 +444,8 @@ class ReviewRunner:
                     added_lines=result.added_lines,
                     batches=result.batches,
                     rewrites=result.rewrites + 1,
+                    # P0-5: 机器已确认的维度要跨轮继承(与 added_lines 同等对待)
+                    verified_dimensions=dict(result.verified_dimensions),
                 )
                 feedback = [
                     v.reason for v in verdicts
@@ -507,6 +511,7 @@ class ReviewRunner:
                 added_lines=result.added_lines,
                 batches=result.batches,
                 rewrites=result.rewrites,  # 保留重写计数
+                verified_dimensions=dict(result.verified_dimensions),  # P0-5: 跨轮继承事实
             )
             result = self._run_batches(pr, batches, fresh, handled=handled, feedback=jr.reasons)
         return result
