@@ -205,11 +205,16 @@ _SPECULATION_MARKERS = (
 # 具体验证路径的特征(2026-09-13 评审 R2-1): 只要 verification 里给出了**具体可复现的东西**,
 # 就不能再判成"自认推演"——一个通用词(如 n/a)或一句补充说明, 不能盖过已经给出的路径。
 # 方向性理由: 误判成推演会降到 2 并解除阻塞, 属"把真问题放走"; 反之只是多留一条问题。
-_PATH_SIGNALS = ("::", "tests/", "test_", "http://", "https://")
+#
+# 只认**结构化**形态(评审 R4-1): 裸子串 `test_` / `tests/` 会把"未新增 test_ 用例,
+# 交付前无法验证"这类**自认没路径**的文本误判成"已给出路径" → 不降级(方向反了)。
+# 所以 test 类只认带路径段的 `tests/xxx`。
+_PATH_SIGNALS = ("::", "http://", "https://")
 _PATH_PATTERNS = (
     re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+/", re.I),
     re.compile(r"`[^`]{3,}`"),                       # 反引号里的命令/片段
     re.compile(r"\b[\w-]+\.(py|js|ts|go|java|rb|sh)\b"),  # 具体文件
+    re.compile(r"\btests?/[\w./-]+"),                 # 带路径段的测试路径(tests/xxx)
 )
 
 
