@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,6 +14,8 @@ try:  # PyYAML 是 pr-review 唯一新增运行时依赖
     import yaml
 except ImportError:  # pragma: no cover - 依赖缺失时给出可读错误
     yaml = None  # type: ignore[assignment]
+
+logger = logging.getLogger("pr_review.config")
 
 # 严重级别从高到低(旧字符串, 兼容迁移/测试)
 SEVERITIES = ("error", "warn", "info")
@@ -255,6 +258,22 @@ class ReviewConfig:
 DEFAULT_CONFIG = ReviewConfig()
 
 
+def _warn_pyyaml_missing(path: str | Path) -> None:
+    """PyYAML 缺失、配置却存在时报警。
+
+    用 logger.warning（与 gateway/config.py 同款仓库惯例）。
+    实测可达性：main.py 走 basicConfig 时是有格式的 WARNING 行；
+    pr_review/cli.py 未配置 logging 时由 logging.lastResort 兜底输出到 stderr。
+    两个入口都可见，因此不额外引入 warnings 模块。
+    """
+    logger.warning(
+        "PyYAML 未安装，无法解析审查配置 %s —— 该文件将被忽略，"
+        "review_focus / min_severity / fail_on_severity / context_files 等"
+        "全部退回默认值。请安装依赖：pip install PyYAML",
+        path,
+    )
+
+
 def load_config(path: str | Path | None = None) -> ReviewConfig:
     """加载 .ai-review.yaml;文件缺失/为空时使用默认配置。
 
@@ -262,6 +281,11 @@ def load_config(path: str | Path | None = None) -> ReviewConfig:
     """
     cfg = ReviewConfig()  # 默认值与 DEFAULT_CONFIG 一致,但独立可变
     if yaml is None:
+        # 调用方明确给了配置文件、文件也确实存在，却因为缺依赖读不了：
+        # 这是必须报出来的环境错误，不能静默回落（否则"配了但没生效"不留任何痕迹）。
+        # 仍然返回默认配置，保持"配置缺失也能跑"的既有约定，不抛异常。
+        if path is not None and Path(path).is_file():
+            _warn_pyyaml_missing(path)
         return cfg
     if path is None or not Path(path).is_file():
         return cfg

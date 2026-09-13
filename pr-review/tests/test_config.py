@@ -1,7 +1,10 @@
 """审查配置加载 / 过滤逻辑单测。"""
 
+import logging
+
 import pytest
 
+from pr_review import config as config_mod
 from pr_review.config import DEFAULT_CONFIG, load_config
 
 
@@ -98,3 +101,41 @@ def test_default_quality_gate():
     assert cfg.quality_gate.pass_score == 70
     assert cfg.quality_gate.max_rewrites == 3
     assert cfg.quality_gate.lint_enabled is False  # 首版预留
+
+
+def test_load_config_warns_when_pyyaml_missing(tmp_path, monkeypatch, caplog):
+    """PyYAML 缺失 + 配置文件存在时，不得静默忽略整个配置。
+
+    背景: `if yaml is None: return cfg` 会让 review_focus / min_severity /
+    fail_on_severity / context_files 全部退回默认值，且不报错、不警告 ——
+    属于「配了但没生效」的静默失败：比配错更危险，因为没有任何信号。
+    """
+    f = tmp_path / ".ai-review.yaml"
+    f.write_text("min_severity: error\n", encoding="utf-8")
+    monkeypatch.setattr(config_mod, "yaml", None)
+
+    with caplog.at_level(logging.WARNING, logger="pr_review.config"):
+        cfg = config_mod.load_config(f)
+
+    # 行为不变: 不抛异常，仍返回可用的默认配置(与"配置文件缺失"的既有约定一致)
+    assert cfg.min_severity == 2, "配置读不到时应回落到默认值"
+    warnings_logged = [r.getMessage() for r in caplog.records if "PyYAML" in r.getMessage()]
+    assert warnings_logged, "必须留下可见的警告，否则用户无从知道配置被忽略了"
+    assert str(f) in warnings_logged[0], "警告要指出是哪个文件被忽略了，否则无法排查"
+
+
+def test_load_config_no_warning_when_no_config_file(tmp_path, monkeypatch, caplog):
+    """反向守护: 没给路径 / 路径不存在时不得报警。
+
+    这两种情况是文档明确约定的"使用默认配置"，不是错误。
+    没有这条反向断言，上面那条测试可以靠"无脑报警"通过。
+    """
+    monkeypatch.setattr(config_mod, "yaml", None)
+
+    with caplog.at_level(logging.WARNING, logger="pr_review.config"):
+        for arg in (None, tmp_path / "不存在的配置.yaml"):
+            cfg = config_mod.load_config(arg)
+            assert cfg.min_severity == 2
+    assert not [r for r in caplog.records if "PyYAML" in r.getMessage()], (
+        "路径缺失属于正常回落，不应报警"
+    )
