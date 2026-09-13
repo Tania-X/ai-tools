@@ -308,15 +308,15 @@ def _high_judgement(issue: Any) -> tuple[int, str] | None:
     "是否算高判"与"降到几档"两处各写一套顺序而后漂移。
 
     优先级(自上而下, 前者命中即定档):
-      1. 纯约定违反(category=convention)      → 3: 本仓策略锚点"明确约定违反=3"
-      2. verification 自认属推演(P0-1)        → 2: 连路径都拿不出, 映射表里"无路径"即轻微级
-      3. 假设性措辞 / trigger=hypothetical   → 3: 假设性故障最高 3(必修不阻塞)
-      4. 无 verification 且无 evidence        → 3: 无任何事实支点
+      1. verification 自认属推演(P0-1)        → 2: 连路径都拿不出, 映射表里"无路径"即轻微级
+      2. 假设性措辞 / trigger=hypothetical   → 3: 假设性故障最高 3(必修不阻塞)
+      3. 无 verification 且无 evidence        → 3: 无任何事实支点
+
+    注: `category=convention` 由更早的 `_CONVENTION_TIER` 规则单独处理(建议档 2),
+    不在这里——它跟 severity 是否 ≥4 无关。
     """
     if int(getattr(issue, "severity", 0) or 0) < 4:
         return None
-    if str(getattr(issue, "category", "") or "").strip().lower() == "convention":
-        return (3, "convention")
     if _verification_is_speculative(issue):
         return (2, "speculative")
     if _looks_hypothetical(issue):
@@ -328,9 +328,13 @@ def _high_judgement(issue: Any) -> tuple[int, str] | None:
     return None
 
 
+# P0-5 职责边界(用户 2026-09-13 拍板"按 P0-5 来"): 纯约定违反(category=convention)
+# 属"风格/约定"维度 → **建议档 2**, 不计门禁。原先的锚点"明确约定违反=3(必修不阻塞)"
+# 已随本决定废止(动机: 约定类问题该由 ruff/仓库约定文档负责, 评审报它既重复又与门禁无关)。
+_CONVENTION_TIER = 2
+
 # 命中信号 → 降级理由(P0-1 文案的唯一来源)
 _HIGH_JUDGEMENT_REASONS = {
-    "convention": "纯约定违反(策略锚点=3)",
     "speculative": "自认可验证路径属推演(P0-1 无可验证路径)",
     "hypothetical_wording": "证据/描述呈假设性故障",
     "trigger_hypothetical": "LLM 自标 trigger=hypothetical",
@@ -382,6 +386,7 @@ def per_issue_verify(
     3. severity 越界(非 1-5) → fix(钳制到合法范围)
     4. 假设性证据 / LLM 自标 trigger=hypothetical / 纯约定违反 /
        门禁级(≥4)但既无 verification 又无 evidence → downgrade 到 3(必修不阻塞)
+    4a. 纯约定违反(category=convention)→ downgrade 到 2(建议档, 不计门禁; P0-5)
     4b. 自认可验证路径属推演(none: 属推演)+ 级别 ≥4 → downgrade 到 2(轻微)
        - 报告 P0-1 指定; 与 severity 映射表"无路径→轻微"一致
     4c. 落在"机器已确认的维度"上(如 CI mypy 通过)且未说明工具为何没拦住 → downgrade 到 2
@@ -420,8 +425,25 @@ def per_issue_verify(
             )
             continue
 
+        # 4a. 纯约定违反 → 建议档(P0-5: 风格/约定不计门禁)
+        if (
+            str(getattr(issue, "category", "") or "").strip().lower() == "convention"
+            and sev > _CONVENTION_TIER
+        ):
+            verdicts.append(
+                IssueVerdict(
+                    issue=issue, action=ACTION_DOWNGRADE, new_severity=_CONVENTION_TIER,
+                    reason=(
+                        f"纯约定违反属建议档(P0-5 职责边界: 风格/约定不计门禁), "
+                        f"从 {sev} 降级到 {_CONVENTION_TIER}"
+                    ),
+                )
+            )
+            continue
+
         # 4. 严重度高判(≥4, 会拦合并) → 降级到 3(必修不阻塞)
-        #    三信号: 假设性措辞 / trigger=hypothetical / category=convention(策略锚点约定违反=3)
+        #    信号: 假设性措辞 / trigger=hypothetical / 自认推演 / 无依据
+        #    (约定违反已由 4a 单独处理成建议档)
         high = _high_judgement(issue)
         if high is not None:
             target, signal = high
