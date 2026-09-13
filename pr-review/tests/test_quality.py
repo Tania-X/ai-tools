@@ -974,3 +974,48 @@ def test_r2_2_retry_call_failure_is_a_judge_fault_not_a_crash():
     )
     assert jr.parse_failed is True
     assert jr.raw == "没有 JSON"     # 兜底时留档的是首次输出(唯一拿到的那次)
+
+
+# ---------------------------------------------------------------- 评审 R4-1 回归(2026-09-13)
+def test_r4_1_generic_test_tokens_are_not_paths():
+    """R4-1 回归: 裸 `test_`/`tests/` 不能算"已给出路径", 否则自认没路径的文本不降级。
+
+    评审给的例子本身是误读(它原本就没被误判), 但同类的真实反例存在——下面这些在修复前
+    都会被判成"有路径"→ 不降级 → 门禁级问题继续拦合并(方向与 P0-1 相反)。
+    """
+    for text in (
+        "无法给出可复现的 pytest 用例, 只能由语言先验推断",   # 评审给的例子(钉住, 免得回退)
+        "未新增 test_ 用例, 交付前无法验证",
+        "没有 tests/ 目录可言, 属推测",
+    ):
+        v = per_issue_verify([_gate(sev=4, verification=text)], {"a.py": {1}})[0]
+        assert v.action == ACTION_DOWNGRADE and v.new_severity == 2, f"{text} 应算自认推演"
+        assert "path detector" not in v.reason
+
+
+def test_r4_1_structured_test_references_are_still_paths():
+    """R4-1 反向守卫: 真正的测试引用仍是路径(不能把 test 类一棍子打死)。"""
+    for text in (
+        "见 tests/conftest::fixture 的构造",
+        "对照 tests/test_x.py::test_y (该用例挡不住, 它只覆盖 happy path)",
+        "pytest tests/test_x.py -k y",
+        # 只有结构化 tests/xxx 正则能命中的形态(无 ::、无 .py、无反引号):
+        # 没有这条用例, 那条正则在变异测试里就是空转的
+        "见 tests/conftest 的 fixture, 该用例挡不住",
+    ):
+        v = per_issue_verify([_gate(sev=4, verification=text)], {"a.py": {1}})[0]
+        assert v.action == ACTION_KEEP, f"{text} 是具体测试引用, 不该判推演"
+
+
+def test_r4_1_path_detector_shape():
+    """R4-1: 路径判定只认结构化形态(节点 id / 具体文件 / 请求 / 反引号命令 / tests/xxx)。"""
+    from pr_review.quality import _looks_like_verification_path as hit
+
+    assert hit("tests/conftest::fixture")
+    assert hit("tests/test_x.py")
+    assert hit("tests/conftest")          # 无扩展名的测试路径
+    assert hit("POST /api/x 传 tenant_id=abc")
+    assert hit("`pytest tests/test_x.py -k y`")
+    assert not hit("未新增 test_ 用例")
+    assert not hit("没有 tests/ 目录")
+    assert not hit("pytest 用例拿不出来")
