@@ -274,24 +274,18 @@ def _has_no_basis(issue: Any) -> bool:
 # 只收**缺口式**说法(评审 R1-2): 早先含裸 "检查范围" / "exclude", 会把"该问题在检查范围内,
 # mypy 本应抓到"这类**相反语义**的表述也算成"已解释缺口" → 本该降级的门禁级问题被保留。
 # 注意"漏"这类单字不收(会命中"漏洞"); 只收明确的否定/缺失短语。
-_GAP_MARKERS = (
-    "未覆盖", "不在检查范围", "未纳入", "漏检", "未检查", "没有检查", "未被检查",
-    "noqa", "type: ignore", "excluded", "exclude 掉", "ignore 掉",
-    "未启用", "未配置", "未跑", "没跑", "未接", "未装", "缺失", "不在 files", "改名",
-)
-
-
 def _mentions_tool_gap(issue: Any, tool: str = "") -> bool:
-    """issue 是否解释了"为什么现有工具没拦住"(P0-5)。
+    """issue 是否显式说明了"为什么现有工具没拦住"(P0-5)。
 
-    **只认缺口式表述**(未覆盖/不在检查范围/缺失/noqa/type: ignore …)。
-    早先还有一条"文本里出现工具名就算"——那是裸子串: "mypy 本应抓到却没有"同样命中,
-    等于把相反语义当成解释, 与评审 R1-2 指出的缺陷同族(修复时被自己的测试抓出来)。
-    参数 tool 不参与判定, 仅供调用方拼理由文案。
+    判据 = `tool_gap` 字段非空(**不看** detail/evidence 里的自由文本)。
+    演进(三轮评审打穿同一条启发式):
+      1. 曾用裸子串 "检查范围"      → "该问题在检查范围内, mypy 本应抓到"也命中(相反语义)
+      2. 改成"文本里出现工具名就算"  → "mypy 本应抓到却没有"同样命中, 同族缺陷
+      3. 补 "缺失/改名" 等否定词    → "参数类型标注缺失"这类无关文本又命中, 规则大面积空转
+    结论: 从自由文本里猜"有没有解释"这条路走不通, 与 P0-1 一样改成**让模型显式填字段**;
+    确定性层只判字段是否为空, 不再猜语义。参数 tool 仅供调用方拼理由文案。
     """
-    hay = " ".join(str(getattr(issue, f, "") or "") for f in
-                   ("detail", "evidence", "verification", "suggestion")).lower()
-    return any(m in hay for m in _GAP_MARKERS)
+    return bool(str(getattr(issue, "tool_gap", "") or "").strip())
 
 
 def _is_toolchain_covered_no_gap(issue: Any, verified_dimensions: dict[str, str]) -> bool:

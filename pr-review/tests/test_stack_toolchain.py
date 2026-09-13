@@ -131,8 +131,16 @@ def test_prompt_has_semantics_and_toolchain_rules():
     flat = "".join(SYSTEM_PROMPT.split())
     assert "语言语义不得凭直觉断言" in flat
     assert "机器已确认的维度不要重复报" in flat
-    assert "为什么现有工具没拦住它" in flat
     assert "convention" in flat
+
+    # 规则 20 与 JSON schema **各要出现一次 tool_gap**: 只断言"整份 prompt 里有"会被另一处掩盖
+    # (变异测试抓到过: 改掉规则 20 里的字段名, 断言仍通过)
+    rule_20 = flat[flat.index("20.【机器已确认的维度"):flat.index("输出JSON结构")]
+    # 钉住"要求用语"而不只是字段名: 规则 20 里字段名出现两次, 只查字面量会被第二次掩盖
+    assert "必须填写`tool_gap`字段" in rule_20, "规则 20 必须明确要求填 tool_gap"
+    assert "为什么没拦住它" in rule_20
+    schema = flat[flat.index("输出JSON结构"):]
+    assert '"tool_gap"' in schema, "JSON schema 必须给出 tool_gap 字段"
 
 
 # --------------------------------------------------------------- CI 事实采集
@@ -213,58 +221,81 @@ def test_p05_downgrades_covered_dimension_without_gap_explanation():
     assert "mypy" in v.reason
 
 
-def test_p05_keeps_when_gap_stated_without_common_markers():
-    """缺口用"缺失/改名"这类说法讲清楚时也要算数(不能只认"未覆盖"那几个词)。
-
-    (这条原本钉的是"点了工具名就算", 评审 R1-2 之后那个机制已删除——见下面那条用例。)
-    """
-    issue = _issue(verification="该类型问题由 mypy 负责, 本次该 check 在 CI 里缺失(仓库改名)")
-    hay = " ".join([issue.detail, issue.evidence, issue.verification, issue.suggestion])
-    assert not any(m in hay for m in ("未覆盖", "未检查", "noqa", "type: ignore")), "本用例须只走缺失式表述"
+def test_p05_keeps_when_tool_gap_field_filled():
+    """P0-5 判据 = `tool_gap` 字段非空; 文案怎么写不影响判定。"""
+    issue = _issue(category="type_consistency", severity=4, detail="类型不一致")
+    issue.tool_gap = "该文件不在 mypy files 检查范围内(新目录未纳入)"
     v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
     assert v.action == ACTION_KEEP
 
 
-def test_p05_mentioning_tool_name_is_not_a_gap_explanation():
-    """评审 R1-2 同族: 只"提到工具名"不算解释缺口, 否则相反语义也会被放过。
+def test_p05_free_text_explanation_does_not_count():
+    """评审 R4-1 的根因: 从自由文本猜"有没有解释"走不通——只认字段。
 
-    "mypy 本应抓到却没有"里出现了 mypy, 但它恰恰在说工具**应该**抓到——不是缺口说明。
+    修复前的关键词表包含 "缺失"/"改名", 于是"参数类型标注缺失"这类与工具缺口无关的描述
+    也被算成解释 → 规则 4c 大面积空转。现在 detail 里写什么都不影响判定。
     """
-    issue = _issue(detail="mypy 本应抓到却没有", category="type_consistency", severity=4)
-    issue.verification = "见 a.py:12 的类型标注"
-    v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
-    assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
+    for text in (
+        "参数类型标注缺失",
+        "命名不规范, 建议改名",
+        "mypy 本应抓到却没有",              # 反面: 想表达工具漏了, 也得写进 tool_gap
+        "该文件不在检查范围",                # 连"正确的解释"写在 detail 里也不算
+    ):
+        issue = _issue(category="type_consistency", severity=4, detail=text)
+        issue.verification = "见 a.py:12"
+        v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
+        assert v.action == ACTION_DOWNGRADE, f"{text!r} 写在 detail 里不算解释, 应降级"
+        assert v.new_severity == 2
 
 
-def test_p05_keeps_when_gap_explained_by_ignore_marker():
-    issue = _issue(detail="该行有 type: ignore 掩盖了不一致")
+def test_p05_empty_or_blank_tool_gap_is_downgraded():
+    """反向守卫: tool_gap 只有空白字符 = 没填。"""
+    issue = _issue(category="type_consistency", severity=4)
+    issue.tool_gap = "   \n  "
     v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
-    assert v.action == ACTION_KEEP
+    assert v.action == ACTION_DOWNGRADE
+
+
+def test_p05_tool_gap_parsed_from_model_output():
+    """字段要从模型输出解析出来(否则模型写了也没用)。"""
+    issue = ReviewIssue.from_dict({
+        "file": "a.py", "line": 1, "severity": "fatal", "title": "t", "detail": "d",
+        "suggestion": "", "category": "type_consistency", "trigger": "real", "impact": "fatal",
+        "tool_gap": "该 check 未配置",
+    })
+    assert issue.tool_gap == "该 check 未配置"
 
 
 def test_p05_inactive_when_dimension_not_verified():
     """反向守卫: 该维度没被机器确认(如仓库没接 mypy) → 规则不生效, 不降级。"""
-    v = per_issue_verify([_issue()], {"a.py": {1}}, verified_dimensions={"style": "ruff"})[0]
+    issue = _issue(category="type_consistency", severity=4)
+    v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"style": "ruff"})[0]
     assert v.action == ACTION_KEEP
 
 
 def test_p05_inactive_when_no_toolchain_declared():
-    """反向守卫: 没声明工具链(旧行为) → 完全不影响既有判定。"""
-    v = per_issue_verify([_issue()], {"a.py": {1}})[0]
+    """反向守卫: 没声明工具链(旧行为) → 完全不影响既有判定, 也不因 tool_gap 为空降级。"""
+    v = per_issue_verify([_issue(category="type_consistency", severity=4)], {"a.py": {1}})[0]
     assert v.action == ACTION_KEEP
 
 
 def test_p05_does_not_downgrade_bug_category():
     """反向守卫: bug/security 类问题不属任何工具维度, 不能被这条规则降级。"""
     issue = _issue(category="bug", severity=5, detail="nil 解引用必然 panic")
-    v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy", "style": "ruff"})[0]
+    v = per_issue_verify(
+        [issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy", "style": "ruff"}
+    )[0]
     assert v.action == ACTION_KEEP
 
 
-def test_p05_convention_covered_by_style():
-    issue = _issue(category="convention", severity=3, detail="命名不符合约定")
-    v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"style": "ruff"})[0]
-    assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
+def test_p05_convention_follows_advisory_rule_not_toolchain():
+    """convention 现在由 4a(建议档)处理, 与工具链规则无关: 无论 tool_gap 是否填写都是 2。"""
+    for gap in ("", "该规则 ruff 未覆盖"):
+        issue = _issue(category="convention", severity=3, detail="命名不符合约定")
+        issue.tool_gap = gap
+        v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"style": "ruff"})[0]
+        assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
+        assert "建议档" in v.reason
 
 
 def test_p05_structural_signal_for_covered_dimension():
@@ -387,10 +418,11 @@ def test_p05_rule_uses_single_source_of_truth():
 
 # --------------------------------------------------------------- 评审 R1-2 / R1-3 回归
 def test_r1_2_positive_phrasing_is_not_a_gap_explanation():
-    """R1-2 回归: "在检查范围内, 工具本应抓到"是**相反语义**, 不能算已解释缺口。
+    """R1-2 回归(机制已演进): 自由文本里的这类表述不能算解释, 只有 tool_gap 字段算。
 
-    修复前 `_GAP_MARKERS` 含裸 "检查范围", 它是 "在检查范围内" 的子串 → 命中 → 保留不降级
-    → 规则 4c 失效(门禁级问题照旧拦合并)。
+    历史: 最早 `_GAP_MARKERS` 含裸 "检查范围", 而它是 "在检查范围内" 的子串 → 误判为已解释
+    → 规则 4c 失效。后续两轮又分别打穿了工具名路径与 "缺失/改名" 词表, 最终改为字段判据;
+    本条用例钉住的是"自由文本说了什么都不算"这一契约。
     """
     issue = _issue(
         detail="该问题在检查范围内, mypy 本应抓到却没有",
@@ -399,19 +431,6 @@ def test_r1_2_positive_phrasing_is_not_a_gap_explanation():
     v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
     assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
 
-
-def test_r1_2_negative_phrasings_still_count():
-    """R1-2 反向守卫: 真正的缺口式说法仍被认可(修复不能把功能修没)。"""
-    for text in (
-        "mypy 未覆盖该文件",
-        "该文件不在检查范围(mypy files 未含 tests/)",
-        "该行有 # type: ignore 掩盖了不一致",
-        "此规则 excluded, 未纳入检查",
-    ):
-        issue = _issue(detail=text, category="type_consistency", severity=4)
-        issue.verification = "见 a.py:12 的类型标注"
-        v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
-        assert v.action == ACTION_KEEP, f"{text} 是缺口说明, 应保留原级"
 
 
 def test_r1_3_check_runs_pagination_collects_all_pages():
@@ -445,3 +464,29 @@ def test_r1_3_check_runs_single_page_no_extra_request():
     )):
         runs = client.get_check_runs("abc")
     assert len(runs) == 1 and [c.get("page") for c in calls] == [1]
+
+
+def test_r4_2_in_progress_check_is_not_verified():
+    """R4-2 回归: 进行中的 check(只有 status, 没有 conclusion)不能算"机器已确认"。
+
+    修复前 `conclusion or status` 会把 "in_progress" 塞进 conclusion —— 恰好不在白名单里所以
+    侥幸没事, 但契约已被污染; 现在显式要求 status == completed, 并单独断言字段语义。
+    """
+    platform = MagicMock()
+    platform.get_check_runs.return_value = [
+        {"name": "Type check (mypy)", "conclusion": "", "status": "in_progress"},
+    ]
+    runner = _runner(platform, _tc_cfg())
+    assert runner._verified_dimension_tools(_pr()) == {}
+
+
+def test_r4_2_check_runs_keeps_conclusion_and_status_separate():
+    """R4-2 回归: get_check_runs 返回的 conclusion 只放结论, status 单独保留。"""
+    from pr_review.github import GitHubClient
+
+    client = GitHubClient(token="t", repo="o/r", pr_number=1)
+    with patch.object(client, "_get", side_effect=lambda path, params=None: {
+        "check_runs": [{"name": "ci", "status": "in_progress", "conclusion": None}]
+    }):
+        runs = client.get_check_runs("abc")
+    assert runs == [{"name": "ci", "conclusion": "", "status": "in_progress"}]

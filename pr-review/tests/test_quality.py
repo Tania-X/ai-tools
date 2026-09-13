@@ -1031,9 +1031,12 @@ def test_r4_1_structured_test_references_are_still_paths():
         "见 tests/conftest::fixture 的构造",
         "对照 tests/test_x.py::test_y (该用例挡不住, 它只覆盖 happy path)",
         "pytest tests/test_x.py -k y",
-        # 只有结构化 tests/xxx 正则能命中的形态(无 ::、无 .py、无反引号):
-        # 没有这条用例, 那条正则在变异测试里就是空转的
-        "见 tests/conftest 的 fixture, 该用例挡不住",
+        # 只有结构化 tests/xxx 正则能命中, 且带标记词(同上, 否则无法区分实现):
+        "见 tests/conftest 的 fixture; 并发场景无法验证",
+        # 只有裸 "::" 信号能命中的形态, 且**带标记词**: 只有这样, "判成有路径"(KEEP) 与
+        # "判成非推演"(也 KEEP) 才能被区分——不带标记词时两种实现给出同一结果, 用例是空转的
+        # (变异测试抓到过这一点, 这就是 R1-1 的原始场景)
+        "见 conftest::fixture 的构造(该用例挡不住); 其余场景无法验证",
     ):
         v = per_issue_verify([_gate(sev=4, verification=text)], {"a.py": {1}})[0]
         assert v.action == ACTION_KEEP, f"{text} 是具体测试引用, 不该判推演"

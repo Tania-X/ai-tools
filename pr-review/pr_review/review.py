@@ -106,6 +106,11 @@ class ReviewIssue:
     # 三选一——复现输入/命令、能反驳它的现有测试名、或 "none: 属推演";
     # 空白表示没给, 由 quality.per_issue_verify 兜底降级。
     verification: str = ""
+    # P0-5: 落在"机器已确认维度"上的问题, 必须在此说明**为什么该工具没拦住**
+    # (如该文件不在检查范围/该 check 缺失/规则未覆盖)。空 → 确定性降级到提醒级。
+    # 为什么用字段而不是关键词匹配: 见 quality._is_toolchain_covered_no_gap 的注释
+    # (关键词启发式被评审连打穿三轮: "检查范围" → 工具名 → "缺失")。
+    tool_gap: str = ""
     needs_review: bool = False  # 需人工确认(设计意图类不确定判断,不计入门禁)
     # 两轴事实原始值(2026-08-24 保留, 供质量门确定性降级用):
     #   trigger: real / hypothetical / style; impact: fatal / functional / minor / none
@@ -142,6 +147,7 @@ class ReviewIssue:
             category=str(d.get("category", "other")),
             evidence=str(d.get("evidence", "")),
             verification=str(d.get("verification", "")),
+            tool_gap=str(d.get("tool_gap", "")),
             needs_review=bool(d.get("needs_review", False)),
             trigger=trigger,
             impact=impact,
@@ -604,7 +610,9 @@ class ReviewRunner:
                 if not run:
                     continue
                 conclusion = str(run.get("conclusion", "")).lower()
-                if conclusion in ("success", "neutral", "skipped"):
+                status = str(run.get("status", "")).lower()
+                # 显式要求已完成: 进行中的 check 不能算"机器已确认"(评审 R4-2)
+                if status == "completed" and conclusion in ("success", "neutral", "skipped"):
                     verified.append({
                         "dimension": c.dimension, "tool": c.tool,
                         "name": c.name, "conclusion": conclusion,

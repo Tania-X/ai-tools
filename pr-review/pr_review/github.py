@@ -212,7 +212,9 @@ class GitHubClient:
         return [
             {
                 "name": str(r.get("name", "")),
-                "conclusion": str(r.get("conclusion") or r.get("status") or ""),
+                # conclusion 只放 conclusion(评审 R4-2): 早先回退到 status, 会把
+                # queued/in_progress 塞进"结论"字段, 语义被污染(下游按 conclusion 判断即踩坑)
+                "conclusion": str(r.get("conclusion") or ""),
                 "status": str(r.get("status", "")),
             }
             for r in runs
