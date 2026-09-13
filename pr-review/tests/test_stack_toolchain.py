@@ -360,7 +360,14 @@ def test_p05_verified_dimensions_survive_sentinel_rewrite():
         "detail": "标注 str 却传 int", "suggestion": "",
         "category": "type_consistency", "evidence": "a.py:1 标注 str",
     }])
-    result = runner.run()
+    # judge 用 patch 顶掉: 哨兵重写后是否再过 judge 取决于 fix/sentinel-round-judge 是否已合并,
+    # 不 patch 的话两条分支合并后这次调用会多消耗一次 mock 响应 → StopIteration(纯夹具问题)。
+    # 本用例只关心"事实跨轮存在", 故对两种顺序都成立。
+    from pr_review.quality import JudgeResult
+
+    with patch("pr_review.quality.Judge.evaluate",
+               side_effect=lambda r, d: JudgeResult(score=80, verdict="pass", reasons=[])):
+        result = runner.run()
 
     # type_consistency 落在已确认的 typing 维度且未说明工具缺口 → 降级 → 1/1 触发哨兵
     assert result.rewrites == 1, "哨兵应触发一次整批重写"
