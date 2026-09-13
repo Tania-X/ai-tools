@@ -397,6 +397,8 @@ class ReviewRunner:
             )
             return result
 
+        sentinel_rewrote = False
+
         # ── 逐条验证层(2026-08-20 改造, 建议 1): 零成本确定性先处理 ──
         # 对的不动, 错的单独处理(删除幻觉/降级高判/修正越界), 不整批重写。
         if result.issues:
@@ -428,8 +430,11 @@ class ReviewRunner:
                     if v.action in ("delete", "downgrade", "fix")
                 ][:10]
                 result = self._run_batches(pr, batches, fresh, handled=handled, feedback=feedback)
-                result.quality_verdict = "degraded" if result.rewrites >= self.config.quality_gate.max_rewrites else "pass"
-                return result
+                # 哨兵重写后**不再直接返回**(2026-09-13 决策): 这一批恰恰是刚被判"整体不可信"
+                # 之后重写的产物, 最该复核, 却原来直接被标成 pass 发布。现在继续走下面的 judge。
+                # 注意: 不重置 quality_verdict —— 交给 judge 决定(下面会覆盖成 pass/rewrite/degraded)。
+                sentinel_rewrote = True
+                logger.info("哨兵重写完成(第 %d 次), 继续交 judge 复核", result.rewrites)
 
         judge = Judge(llm=self.llm, config=self.config.quality_gate)
         diff_text = self._diff_text()
@@ -444,6 +449,10 @@ class ReviewRunner:
         max_rewrites = (
             1 if not result.issues else self.config.quality_gate.max_rewrites
         )
+        # 哨兵轮已消耗过重写预算, 这里扣掉, 保证"总重写次数"仍受 max_rewrites 约束
+        max_rewrites = max(0, max_rewrites - result.rewrites)
+        if sentinel_rewrote:
+            logger.info("哨兵已重写 %d 次, judge 复核阶段剩余重写预算 %d", result.rewrites, max_rewrites)
 
         for attempt in range(max_rewrites + 1):
             jr = judge.evaluate(result, diff_text)
