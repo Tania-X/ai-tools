@@ -78,6 +78,81 @@ class ReviewToolsConfig:
     max_file_lines: int = 200
 
 
+# ── P0-4/P0-5: 技术栈声明 + 工具链声明 ──────────────────────────────────────
+# 动机(误报现场报告 §3.1/§5): 15 轮门禁级判定里, 8 条误报是"正确代码 + 与 Java/JS
+# 直觉相反的语言规则"; 另有相当部分在问"类型对不对/测试覆盖没覆盖"——那是 mypy 与
+# pytest 的职责。声明技术栈 + 注入工具链真实结果, 是让模型不去猜它没有事实来源的事。
+
+# 语言语义清单(P0-4): 每条的左边是"别的语言的直觉", 右边是 Python 的实际规则。
+# 这份清单不是泛泛的风格建议, 而是本仓 8 个实例逐条对应的确定性规则。
+LANGUAGE_SEMANTICS: dict[str, list[str]] = {
+    "python": [
+        "真值判断看容器是否为空: `{\"data_sources\": []}` 是**非空 dict** → `if filters:` 为真; "
+        "只有空容器/空串/None/0 才为假(JS 里 `[]` 为假, Python 不同)",
+        "异常可按类集中注册处理器(框架级 `@app.exception_handler(X)`, 如 Starlette 沿 MRO 找最精确处理器): "
+        "**不需要每个路由 try/catch**, 也不能据此判定'异常会变成 500'",
+        "异步生命周期: `async with` 块内 `await` 完成后才执行 `__exit__`(块内 await 不等于资源已释放); "
+        "**async generator 必须用 `async with` 包裹**, 直接 `await`/同步 with 会 TypeError",
+        "普通 `@dataclass`(含 frozen=True)**不校验**参数值: 值对象的构造器不做范围检查, "
+        "非法值要等到查库/比较时才体现(常表现为 404 而非 500)",
+        "动态类型: **没有编译期类型检查**, 类型不一致会延迟到运行时才炸; 这类问题属 mypy/类型检查器的职责",
+        "`x or default` 惯用法里 default 常来自配置对象(如 `settings.foo`), **不是硬编码常量**; "
+        "同理 `field(default_factory=list)` 是可变默认值的**正确修法**, 不是缺陷",
+    ],
+}
+
+# 分类 → 工具链维度(P0-5): 用于"这个问题本该由哪个机器负责"的映射
+CATEGORY_TOOL_DIMENSION: dict[str, str] = {
+    "type_consistency": "typing",
+    "convention": "style",
+    "style": "style",
+}
+
+
+@dataclass
+class ToolchainCheck:
+    """一条由机器负责的检查(声明式, 不含命令执行)。"""
+
+    name: str = ""            # CI 里的 check 名(如 "Type check (uv run mypy)"), 用于匹配 check-run
+    dimension: str = ""       # typing / style / test / build
+    tool: str = ""            # 工具名(如 mypy / ruff / pytest), 注入 prompt 与"为何没拦住"判断用
+
+
+@dataclass
+class StackConfig:
+    """P0-4: 技术栈声明(仓库声明优先, 缺失时可从 diff 后缀推断语言)。"""
+
+    languages: list[str] = field(default_factory=list)   # python / javascript / go ...
+    framework: str = ""
+    async_runtime: str = ""
+    notes: list[str] = field(default_factory=list)        # 仓库特有的语义提醒
+
+    def semantics(self) -> list[str]:
+        """按语言取语义清单(未声明的语言不影响输出)。"""
+        out: list[str] = []
+        for lang in self.languages:
+            out.extend(LANGUAGE_SEMANTICS.get(lang.strip().lower(), []))
+        return out
+
+
+@dataclass
+class ToolchainConfig:
+    """P0-5: 工具链声明。checks 用于把 CI check-run 匹配到"哪个维度已被机器确认"。"""
+
+    enabled: bool = False
+    checks: list[ToolchainCheck] = field(default_factory=list)
+
+    def dimension_for(self, category: str) -> str:
+        return CATEGORY_TOOL_DIMENSION.get((category or "").strip().lower(), "")
+
+    def tool_for_dimension(self, dimension: str) -> str:
+        """该维度由哪个工具负责(首个声明的)。"""
+        for c in self.checks:
+            if c.dimension == dimension:
+                return c.tool
+        return ""
+
+
 @dataclass
 class ReviewConfig:
     # 审查重点(直接作为指令进入 prompt)
@@ -150,6 +225,10 @@ class ReviewConfig:
     review_max_tokens: int = 4096
     # agentic 审查工具(仓库代码访问, 形态二)
     review_tools: ReviewToolsConfig = field(default_factory=ReviewToolsConfig)
+    # 技术栈声明(P0-4): 语言/框架 + 语言语义清单注入
+    stack: StackConfig = field(default_factory=StackConfig)
+    # 工具链声明(P0-5): 哪些维度已由机器负责(ruff/mypy/pytest)
+    toolchain: ToolchainConfig = field(default_factory=ToolchainConfig)
 
     def severity_rank(self, severity: str) -> int:
         """兼容旧调用: 字符串级别 → 数字(2026-08-18 后主逻辑直接用 int)。"""
@@ -228,6 +307,34 @@ def load_config(path: str | Path | None = None) -> ReviewConfig:
             cfg.review_tools.max_result_chars = int(rt["max_result_chars"])
         if "max_file_lines" in rt:
             cfg.review_tools.max_file_lines = int(rt["max_file_lines"])
+    # stack 块(P0-4): 技术栈声明
+    st = data.get("stack") or {}
+    if isinstance(st, dict):
+        if st.get("languages"):
+            cfg.stack.languages = [str(x) for x in st["languages"]]
+        if st.get("framework"):
+            cfg.stack.framework = str(st["framework"])
+        if st.get("async_runtime"):
+            cfg.stack.async_runtime = str(st["async_runtime"])
+        if isinstance(st.get("notes"), list):
+            cfg.stack.notes = [str(x) for x in st["notes"]]
+    # toolchain 块(P0-5): 工具链声明
+    tc = data.get("toolchain") or {}
+    if isinstance(tc, dict):
+        if "enabled" in tc:
+            cfg.toolchain.enabled = bool(tc["enabled"])
+        checks: list[ToolchainCheck] = []
+        for item in tc.get("checks") or []:
+            if not isinstance(item, dict):
+                continue
+            checks.append(ToolchainCheck(
+                name=str(item.get("name", "")),
+                dimension=str(item.get("dimension", "")),
+                tool=str(item.get("tool", "")),
+            ))
+        if checks:
+            cfg.toolchain.checks = checks
+
     # quality_gate 块(缺失则用默认; lint 层首版仅预留)
     qg = data.get("quality_gate") or {}
     if isinstance(qg, dict):

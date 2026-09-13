@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from .models import PRFile, PRInfo
+
+logger = logging.getLogger(__name__)
 
 API_VERSION_HEADERS = {
     "Accept": "application/vnd.github+json",
@@ -174,6 +177,36 @@ class GitHubClient:
         return self._post(f"/repos/{self.repo}/pulls/{self.pr_number}/comments", payload)
 
     # ------------------------------------------------------------------ 内部
+    # ------------------------------------------------------------------ CI 结论(P0-5)
+    def get_check_runs(self, head_sha: str) -> list[dict]:
+        """取该 commit 的 check-runs(只保留结论, 供"机器已确认"注入)。
+
+        容错: 无权限(缺 checks:read)或接口失败 → 返回 [], 审查照常进行
+        (注入工具链事实是增强项, 不能因为拿不到就把整轮评审搞挂)。
+        """
+        if not head_sha:
+            return []
+        try:
+            data = self._get(
+                f"/repos/{self.repo}/commits/{head_sha}/check-runs",
+                params={"per_page": 100},
+            )
+        except Exception as e:  # noqa: BLE001 增强项失败不影响主流程
+            logger.warning("获取 check-runs 失败(忽略, 不做工具链注入): %s", e)
+            return []
+        runs = data.get("check_runs") if isinstance(data, dict) else None
+        if not isinstance(runs, list):
+            return []
+        return [
+            {
+                "name": str(r.get("name", "")),
+                "conclusion": str(r.get("conclusion") or r.get("status") or ""),
+                "status": str(r.get("status", "")),
+            }
+            for r in runs
+            if isinstance(r, dict)
+        ]
+
     def _get(self, path: str, params: dict | None = None) -> Any:
         resp = self._client.get(path, params=params)
         return self._handle(resp, path)
