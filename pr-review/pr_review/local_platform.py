@@ -80,6 +80,10 @@ class LocalPlatform:
             )
         return files
 
+    def get_check_runs(self, head_sha: str) -> list[dict]:
+        """本地模式没有 CI 结论(P0-5 注入降级为"未声明/未知", 不猜)。"""
+        return []
+
     def get_pull_comments(self, per_page: int = 100) -> list[dict]:
         return []
 

@@ -14,7 +14,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .config import QualityConfig, SEVERITIES
+from .config import CATEGORY_TOOL_DIMENSION, QualityConfig, SEVERITIES
 from .prompt import parse_review_json
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,10 @@ class Judge:
         result: ReviewResult(duck type, 访问 .issues/.added_lines/.quality_reasons)
         diff_text: 全部候选文件的紧凑 diff 文本(judge 核对准确性用)
         """
-        signals = structural_signals(result.issues, result.added_lines)
+        signals = structural_signals(
+            result.issues, result.added_lines,
+            getattr(result, "verified_dimensions", None),
+        )
         messages = build_judge_messages(result, diff_text, signals, self.config)
         kwargs: dict[str, Any] = {"max_tokens": 400}
         if self.config.judge_model:
@@ -140,13 +143,16 @@ class Judge:
 
 
 def structural_signals(
-    issues: list[Any], added_lines: dict[str, set[int]]
+    issues: list[Any],
+    added_lines: dict[str, set[int]],
+    verified_dimensions: dict[str, str] | None = None,
 ) -> list[str]:
     """零成本结构校验,产出 judge 参考信号(不直接否决 LLM 输出)。
 
     校验项: 行号缺失 / 行号不在 diff 新增行(疑似幻觉) / severity 越界(1-5) /
     严重度高判(2026-08-19 P1: 证据是假设性故障但级别 ≥4) /
-    可验证性(P0-1, 2026-09-13: ≥3 缺 evidence / ≥4 无任何事实支点 / 自认推演却判 ≥4)。
+    可验证性(P0-1, 2026-09-13: ≥3 缺 evidence / ≥4 无任何事实支点 / 自认推演却判 ≥4) /
+    职责边界(P0-5, 2026-09-13: 落在机器已确认的维度上却未说明工具缺口)。
     """
     signals: list[str] = []
     for issue in issues:
@@ -171,6 +177,14 @@ def structural_signals(
         if issue.severity >= 4 and _verification_is_speculative(issue):
             signals.append(
                 f"{issue.file}:{issue.line} 自认可验证路径属推演, 但级别为 {issue.severity}(≥4 会拦合并)"
+            )
+        # 机器已确认维度上仍报问题却未说明工具缺口(P0-5) → 提示 judge 复核
+        if _is_toolchain_covered_no_gap(issue, verified_dimensions or {}):
+            dimension = CATEGORY_TOOL_DIMENSION.get(
+                str(getattr(issue, "category", "") or "").strip().lower(), ""
+            )
+            signals.append(
+                f"{issue.file}:{issue.line} 落在机器已确认的 {dimension} 维度上, 但未说明工具缺口"
             )
         # 严重度高判: 假设性故障证据 + 高级别(≥4 会拦合并, 最贵的误报)
         if issue.severity >= 4 and _looks_hypothetical(issue):
@@ -254,6 +268,37 @@ def _has_no_basis(issue: Any) -> bool:
     return not v and not e
 
 
+# P0-5 规则(报告 §5): 机器已确认的维度(如 mypy 类型检查通过)上仍报问题 → 必须说明
+# "为什么现有工具没拦住"。说不出理由 = 重复劳动或无依据断言, 降级到 2(不阻塞)。
+# 依据: 15 轮实测里, "类型对不对/测试覆盖没覆盖"本属工具职责, 评审只能靠语言先验猜。
+# 只收**缺口式**说法(评审 R1-2): 早先含裸 "检查范围" / "exclude", 会把"该问题在检查范围内,
+# mypy 本应抓到"这类**相反语义**的表述也算成"已解释缺口" → 本该降级的门禁级问题被保留。
+# 注意"漏"这类单字不收(会命中"漏洞"); 只收明确的否定/缺失短语。
+def _mentions_tool_gap(issue: Any, tool: str = "") -> bool:
+    """issue 是否显式说明了"为什么现有工具没拦住"(P0-5)。
+
+    判据 = `tool_gap` 字段非空(**不看** detail/evidence 里的自由文本)。
+    演进(三轮评审打穿同一条启发式):
+      1. 曾用裸子串 "检查范围"      → "该问题在检查范围内, mypy 本应抓到"也命中(相反语义)
+      2. 改成"文本里出现工具名就算"  → "mypy 本应抓到却没有"同样命中, 同族缺陷
+      3. 补 "缺失/改名" 等否定词    → "参数类型标注缺失"这类无关文本又命中, 规则大面积空转
+    结论: 从自由文本里猜"有没有解释"这条路走不通, 与 P0-1 一样改成**让模型显式填字段**;
+    确定性层只判字段是否为空, 不再猜语义。参数 tool 仅供调用方拼理由文案。
+    """
+    return bool(str(getattr(issue, "tool_gap", "") or "").strip())
+
+
+def _is_toolchain_covered_no_gap(issue: Any, verified_dimensions: dict[str, str]) -> bool:
+    """该 issue 落在"机器已确认的维度"上, 且没说明工具为何没拦住。"""
+    if not verified_dimensions:
+        return False
+    category = str(getattr(issue, "category", "") or "").strip().lower()
+    dimension = CATEGORY_TOOL_DIMENSION.get(category)
+    if not dimension or dimension not in verified_dimensions:
+        return False
+    return not _mentions_tool_gap(issue, verified_dimensions.get(dimension, ""))
+
+
 def _high_judgement(issue: Any) -> tuple[int, str] | None:
     """门禁级严重度高判 → (目标档位, 命中的信号); 不属高判 → None。
 
@@ -261,14 +306,15 @@ def _high_judgement(issue: Any) -> tuple[int, str] | None:
     "是否算高判"与"降到几档"两处各写一套顺序而后漂移。
 
     优先级(自上而下, 前者命中即定档):
-      1. 纯约定违反(category=convention)      → 3: 本仓策略锚点"明确约定违反=3"
-      2. verification 自认属推演(P0-1)        → 2: 连路径都拿不出, 映射表里"无路径"即轻微级
-      3. 假设性措辞 / trigger=hypothetical   → 3: 假设性故障最高 3(必修不阻塞)
-      4. 无 verification 且无 evidence        → 3: 无任何事实支点    """
+      1. verification 自认属推演(P0-1)        → 2: 连路径都拿不出, 映射表里"无路径"即轻微级
+      2. 假设性措辞 / trigger=hypothetical   → 3: 假设性故障最高 3(必修不阻塞)
+      3. 无 verification 且无 evidence        → 3: 无任何事实支点
+
+    注: `category=convention` 由更早的 `_CONVENTION_TIER` 规则单独处理(建议档 2),
+    不在这里——它跟 severity 是否 ≥4 无关。
+    """
     if int(getattr(issue, "severity", 0) or 0) < 4:
         return None
-    if str(getattr(issue, "category", "") or "").strip().lower() == "convention":
-        return (3, "convention")
     if _verification_is_speculative(issue):
         return (2, "speculative")
     if _looks_hypothetical(issue):
@@ -280,9 +326,13 @@ def _high_judgement(issue: Any) -> tuple[int, str] | None:
     return None
 
 
+# P0-5 职责边界(用户 2026-09-13 拍板"按 P0-5 来"): 纯约定违反(category=convention)
+# 属"风格/约定"维度 → **建议档 2**, 不计门禁。原先的锚点"明确约定违反=3(必修不阻塞)"
+# 已随本决定废止(动机: 约定类问题该由 ruff/仓库约定文档负责, 评审报它既重复又与门禁无关)。
+_CONVENTION_TIER = 2
+
 # 命中信号 → 降级理由(P0-1 文案的唯一来源)
 _HIGH_JUDGEMENT_REASONS = {
-    "convention": "纯约定违反(策略锚点=3)",
     "speculative": "自认可验证路径属推演(P0-1 无可验证路径)",
     "hypothetical_wording": "证据/描述呈假设性故障",
     "trigger_hypothetical": "LLM 自标 trigger=hypothetical",
@@ -321,7 +371,11 @@ class IssueVerdict:
     new_severity: int = 0  # 仅 ACTION_DOWNGRADE / ACTION_FIX 时有效
 
 
-def per_issue_verify(issues: list[Any], added_lines: dict[str, set[int]]) -> list[IssueVerdict]:
+def per_issue_verify(
+    issues: list[Any],
+    added_lines: dict[str, set[int]],
+    verified_dimensions: dict[str, str] | None = None,
+) -> list[IssueVerdict]:
     """确定性逐条验证(零成本, 不调 LLM)。
 
     规则(对应 docs/pr-review-quality-gate.md §4 与 review-severity-policy skill):
@@ -330,12 +384,16 @@ def per_issue_verify(issues: list[Any], added_lines: dict[str, set[int]]) -> lis
     3. severity 越界(非 1-5) → fix(钳制到合法范围)
     4. 假设性证据 / LLM 自标 trigger=hypothetical / 纯约定违反 /
        门禁级(≥4)但既无 verification 又无 evidence → downgrade 到 3(必修不阻塞)
+    4a. 纯约定违反(category=convention)→ downgrade 到 2(建议档, 不计门禁; P0-5)
     4b. 自认可验证路径属推演(none: 属推演)+ 级别 ≥4 → downgrade 到 2(轻微)
        - 报告 P0-1 指定; 与 severity 映射表"无路径→轻微"一致
-    5. 其余 → keep
+    4c. 落在"机器已确认的维度"上(如 CI mypy 通过)且未说明工具为何没拦住 → downgrade 到 2
+       - P0-5 职责边界: 该维度由工具负责, 说不出"工具漏在哪"就是重复劳动/无依据断言
+       - verified_dimensions: {维度: 工具名}; 为空(未声明/未确认)→ 本规则不生效
 
     返回 verdict 列表(与 issues 一一对应)。
     """
+    verified = verified_dimensions or {}
     verdicts: list[IssueVerdict] = []
     for issue in issues:
         sev = int(getattr(issue, "severity", 0) or 0)
@@ -365,8 +423,25 @@ def per_issue_verify(issues: list[Any], added_lines: dict[str, set[int]]) -> lis
             )
             continue
 
+        # 4a. 纯约定违反 → 建议档(P0-5: 风格/约定不计门禁)
+        if (
+            str(getattr(issue, "category", "") or "").strip().lower() == "convention"
+            and sev > _CONVENTION_TIER
+        ):
+            verdicts.append(
+                IssueVerdict(
+                    issue=issue, action=ACTION_DOWNGRADE, new_severity=_CONVENTION_TIER,
+                    reason=(
+                        f"纯约定违反属建议档(P0-5 职责边界: 风格/约定不计门禁), "
+                        f"从 {sev} 降级到 {_CONVENTION_TIER}"
+                    ),
+                )
+            )
+            continue
+
         # 4. 严重度高判(≥4, 会拦合并) → 降级到 3(必修不阻塞)
-        #    三信号: 假设性措辞 / trigger=hypothetical / category=convention(策略锚点约定违反=3)
+        #    信号: 假设性措辞 / trigger=hypothetical / 自认推演 / 无依据
+        #    (约定违反已由 4a 单独处理成建议档)
         high = _high_judgement(issue)
         if high is not None:
             target, signal = high
@@ -377,6 +452,23 @@ def per_issue_verify(issues: list[Any], added_lines: dict[str, set[int]]) -> lis
             verdicts.append(
                 IssueVerdict(issue=issue, action=ACTION_DOWNGRADE,
                              reason=reason, new_severity=target)
+            )
+            continue
+
+        # 4c. 机器已确认的维度上仍报问题, 且没说明工具为何没拦住(P0-5)
+        if _is_toolchain_covered_no_gap(issue, verified):
+            dimension = CATEGORY_TOOL_DIMENSION.get(
+                str(getattr(issue, "category", "") or "").strip().lower(), ""
+            )
+            tool = verified.get(dimension, "") or dimension
+            verdicts.append(
+                IssueVerdict(
+                    issue=issue, action=ACTION_DOWNGRADE, new_severity=2,
+                    reason=(
+                        f"{dimension} 维度已由机器确认通过({tool}), 但未说明"
+                        f"「为什么它没拦住」, 降级到 2(该维度应由工具回答)"
+                    ),
+                )
             )
             continue
 

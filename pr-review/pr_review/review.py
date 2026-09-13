@@ -106,6 +106,11 @@ class ReviewIssue:
     # 三选一——复现输入/命令、能反驳它的现有测试名、或 "none: 属推演";
     # 空白表示没给, 由 quality.per_issue_verify 兜底降级。
     verification: str = ""
+    # P0-5: 落在"机器已确认维度"上的问题, 必须在此说明**为什么该工具没拦住**
+    # (如该文件不在检查范围/该 check 缺失/规则未覆盖)。空 → 确定性降级到提醒级。
+    # 为什么用字段而不是关键词匹配: 见 quality._is_toolchain_covered_no_gap 的注释
+    # (关键词启发式被评审连打穿三轮: "检查范围" → 工具名 → "缺失")。
+    tool_gap: str = ""
     needs_review: bool = False  # 需人工确认(设计意图类不确定判断,不计入门禁)
     # 两轴事实原始值(2026-08-24 保留, 供质量门确定性降级用):
     #   trigger: real / hypothetical / style; impact: fatal / functional / minor / none
@@ -142,6 +147,7 @@ class ReviewIssue:
             category=str(d.get("category", "other")),
             evidence=str(d.get("evidence", "")),
             verification=str(d.get("verification", "")),
+            tool_gap=str(d.get("tool_gap", "")),
             needs_review=bool(d.get("needs_review", False)),
             trigger=trigger,
             impact=impact,
@@ -186,6 +192,8 @@ class ReviewResult:
     rewrites: int = 0
     # 审查输出 JSON 解析失败的批次(2026-08-14 事故后引入: 失败必须显式, 不能静默变空 issues)
     parse_errors: list[str] = field(default_factory=list)
+    # P0-5: 本轮"已由机器确认通过"的维度 {维度: 工具}(来自 CI check-run 的真实结论)
+    verified_dimensions: dict[str, str] = field(default_factory=dict)
 
     @property
     def has_issues(self) -> bool:
@@ -224,6 +232,9 @@ class ReviewRunner:
         self.repo_root = Path(repo_root) if repo_root else None
         # 仓库上下文(约定/契约文档摘要),注入 prompt 降低设计意图类误报
         self.context = context
+        # P0-4/P0-5: 技术栈与工具链事实块(首次用到时组装并缓存, 每次 run 只取一次 CI 结论)
+        self._stack_block_cache: str | None = None
+        self._verified_cache: list[dict[str, str]] | None = None
 
     # ------------------------------------------------------------------ 入口
     def run(self) -> ReviewResult:
@@ -241,8 +252,11 @@ class ReviewRunner:
 
     def _run_inner(self, root_span: Any, pr: PRInfo | None = None) -> ReviewResult:
         pr = pr or self.platform.get_pr_info()
+        # P0-5: 先把"机器已确认维度"取一次(CI 事实), 供 prompt 注入与质量门共用同一份事实
+        verified = self._verified_dimension_tools(pr)
         raw_files = self.platform.get_pr_files()
         root_span.set_attribute("pr.files", len(raw_files))
+        root_span.set_attribute("toolchain.verified_dimensions", ",".join(sorted(verified)))
 
         candidates: list[FileDiff] = []
         skipped = 0
@@ -284,6 +298,7 @@ class ReviewRunner:
             return ReviewResult(skipped_files=skipped)
 
         result = ReviewResult(model=self.llm.config.get().model, skipped_files=skipped)
+        result.verified_dimensions = dict(verified)  # P0-5: 供 prompt/质量门共用
         # 记录每个文件的新增行号集合,供行内评论定位校验
         for fd in candidates:
             result.added_lines[fd.path] = {line_no for line_no, _ in fd.added}
@@ -320,6 +335,14 @@ class ReviewRunner:
         )
 
     # ------------------------------------------------------------------ 批次执行
+    def _verified_dimension_tools(self, pr: PRInfo) -> dict[str, str]:
+        """维度 → 负责工具(P0-5 确定性规则用: 机器已确认的维度须解释"为何没拦住")。"""
+        return {
+            str(v.get("dimension", "")): str(v.get("tool", "") or v.get("name", ""))
+            for v in self._verified_dimensions(pr)
+            if v.get("dimension")
+        }
+
     def _run_batches(
         self,
         pr: PRInfo,
@@ -402,7 +425,12 @@ class ReviewRunner:
         # ── 逐条验证层(2026-08-20 改造, 建议 1): 零成本确定性先处理 ──
         # 对的不动, 错的单独处理(删除幻觉/降级高判/修正越界), 不整批重写。
         if result.issues:
-            verdicts = per_issue_verify(result.issues, result.added_lines)
+            # P0-5 单一真源: 事实取自 result.verified_dimensions(_run_inner 里算一次),
+            # 与 judge 信号读同一份; 两处各自重算会让"重写轮丢事实"这类问题只在一侧暴露
+            verdicts = per_issue_verify(
+                result.issues, result.added_lines,
+                verified_dimensions=result.verified_dimensions,
+            )
             touched = sum(1 for v in verdicts if v.action != "keep")
             if touched:
                 logger.info(
@@ -424,6 +452,8 @@ class ReviewRunner:
                     added_lines=result.added_lines,
                     batches=result.batches,
                     rewrites=result.rewrites + 1,
+                    # P0-5: 机器已确认的维度要跨轮继承(与 added_lines 同等对待)
+                    verified_dimensions=dict(result.verified_dimensions),
                 )
                 feedback = [
                     v.reason for v in verdicts
@@ -496,6 +526,7 @@ class ReviewRunner:
                 added_lines=result.added_lines,
                 batches=result.batches,
                 rewrites=result.rewrites,  # 保留重写计数
+                verified_dimensions=dict(result.verified_dimensions),  # P0-5: 跨轮继承事实
             )
             result = self._run_batches(pr, batches, fresh, handled=handled, feedback=jr.reasons)
         return result
@@ -565,6 +596,56 @@ class ReviewRunner:
                 pr, batch, batch_no, batch_total, handled, feedback
             )
 
+    def _verified_dimensions(self, pr: PRInfo) -> list[dict[str, str]]:
+        """P0-5: 仓库声明了该维度 + CI 对应 check 成功 → 该维度"已由机器确认"。
+
+        只认事实: 拿不到 CI 结论时宁可不写(未知), 不能猜成"已确认"——错的确认会直接
+        压制真问题, 比不注入更糟。结果缓存, 一次 run 只取一次 CI。
+        """
+        if self._verified_cache is not None:
+            return self._verified_cache
+        toolchain = getattr(self.config, "toolchain", None)
+        checks = list(getattr(toolchain, "checks", None) or [])
+        verified: list[dict[str, str]] = []
+        if getattr(toolchain, "enabled", False) and checks:
+            runs: list[dict] = []
+            try:
+                runs = self.platform.get_check_runs(getattr(pr, "head_sha", "") or "")
+            except Exception as e:  # noqa: BLE001 增强项失败不影响审查
+                logger.warning("获取 CI 结论失败(忽略): %s", e)
+            by_name = {str(r.get("name", "")).strip(): r for r in runs if r.get("name")}
+            for c in checks:
+                run = by_name.get(str(c.name).strip())
+                if not run:
+                    continue
+                conclusion = str(run.get("conclusion", "")).lower()
+                status = str(run.get("status", "")).lower()
+                # 显式要求已完成: 进行中的 check 不能算"机器已确认"(评审 R4-2)
+                if status == "completed" and conclusion in ("success", "neutral", "skipped"):
+                    verified.append({
+                        "dimension": c.dimension, "tool": c.tool,
+                        "name": c.name, "conclusion": conclusion,
+                    })
+            if not verified:
+                logger.info("工具链已声明但未匹配到结论为成功的 check-run, 本轮不做「已确认」注入")
+        self._verified_cache = verified
+        return verified
+
+    def _stack_block(self, pr: PRInfo) -> str:
+        """P0-4/P0-5: 技术栈 + 语言语义 + 机器已确认维度(注入 user message)。"""
+        if self._stack_block_cache is not None:
+            return self._stack_block_cache
+        from .config import StackConfig  # 局部导入避免环
+        from .prompt import build_stack_block
+
+        stack = getattr(self.config, "stack", None) or StackConfig()
+        verified = self._verified_dimensions(pr)
+        block = build_stack_block(stack, verified)
+        self._stack_block_cache = block
+        if block:
+            logger.info("已注入技术栈/语义块: %d 字符(机器已确认维度 %d 个)", len(block), len(verified))
+        return block
+
     def _review_batch_inner(
         self,
         pr: PRInfo,
@@ -577,6 +658,7 @@ class ReviewRunner:
         messages = build_messages(
             pr, batch, self.config, batch_no, batch_total,
             repo_context=self.context, handled=handled, feedback=feedback,
+            stack_block=self._stack_block(pr),
         )
         tools_cfg = self.config.review_tools
         repo_tools = None

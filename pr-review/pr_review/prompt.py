@@ -123,6 +123,18 @@ SYSTEM_PROMPT = """你是一位资深代码审查专家,正在审查一个 Pull 
     门禁级问题标为推演会被降级到提醒级, 不会阻塞合并。**宁可标 ③ 也不要编造验证路径**;
     同时, 凡是能用一句"作者可这样反驳"挡回去的问题, 按规则 9 直接不要报。
 
+19. 【语言语义不得凭直觉断言】user 消息里会给出「技术栈与语言语义边界」。任何主张"这段代码
+    违反语言/框架语义"的问题(异常处理、真值判断、异步生命周期、数据类校验、类型), 必须在
+    `verification` 里引用具体规则, 或给出可复现片段(如 `python -c "print(bool({'a': []}))"`)。
+    凭 Java/JS 等其它语言的直觉推断"应该是这样"不算依据——这类问题会被确定性降级到提醒级。
+
+20. 【机器已确认的维度不要重复报】user 消息里会列出"已由机器确认通过"的维度(如类型检查 mypy、
+    测试 pytest、风格 ruff)。若仍要报这些维度的问题, **必须填写 `tool_gap` 字段**说明该工具
+    为什么没拦住它(如: 该文件不在工具检查范围、这条 check 未配置/已改名、该规则工具未覆盖)。
+    `tool_gap` 留空会被确定性降级到提醒级——**不要**把解释写在 detail/evidence 里当替代,
+    系统只认这个字段(这样才不会把"类型标注缺失"之类的普通描述误当成解释)。
+    注意: 纯风格/约定问题(convention)本身不计入阻塞门禁。
+
 输出 JSON 结构(严格遵循):
 {
   "summary": "对这个 PR 的整体判断,1-2 句话。无论是否发现问题都必须输出——无问题时给出基于 diff 的正面评价(如'改动结构清晰, 未发现明显问题')。有问题时概括改动质量与主要风险方向(如'结构清晰,但存在一个安全类问题需关注'),不要复述具体 issue 内容——具体问题在下方 issues 列表详述",
@@ -139,11 +151,59 @@ SYSTEM_PROMPT = """你是一位资深代码审查专家,正在审查一个 Pull 
       "suggestion": "具体的修改建议;能给出修复代码时,用 Markdown 代码块给出可直接参考的修复代码(如完整函数或关键片段,标注文件与改动点)",
       "evidence": "判断依据:引用的代码/契约位置,如 'spec 中 CreateAgentRequest.authType 为 string, 而 AgentTarget.authType 为枚举'",
       "verification": "可验证路径(必修及以上必须给): 三选一 —— 复现输入/命令(如 'POST /api/x 传 tenant_id=\"abc\" 返回 500'); 或能反驳本结论的现有测试名(并说明它为何挡不住); 或 \"none: 属推演\"",
+      "tool_gap": "仅当本问题落在'已由机器确认通过'的维度上(如类型检查/风格检查)时需要: 说明该工具为什么没拦住它(如该文件不在检查范围/该 check 未配置/规则未覆盖); 其他情况留空",
       "needs_review": false
     }
   ]
 }
 """
+
+
+def build_stack_block(stack: Any, verified: list[dict[str, str]] | None = None) -> str:
+    """P0-4/P0-5: 组装「技术栈与语义边界」块(注入 user message, 不进 system 常量)。
+
+    stack: StackConfig(语言/框架/异步运行时/仓库备注)
+    verified: 已由机器确认通过的维度 [{"dimension", "tool", "name", "conclusion"}] —
+              来自 CI check-run 的真实结果, 不是模型猜测(报告 P0-5 要求注入"真实结果")。
+    """
+    languages = list(getattr(stack, "languages", []) or [])
+    semantics = stack.semantics() if hasattr(stack, "semantics") else []
+    notes = list(getattr(stack, "notes", []) or [])
+    verified = verified or []
+    if not (languages or semantics or notes or verified):
+        return ""
+
+    lines: list[str] = ["## 技术栈与语言语义边界(P0-4/P0-5)"]
+    head = []
+    if languages:
+        head.append("语言: " + ", ".join(languages))
+    if getattr(stack, "framework", ""):
+        head.append("框架: " + str(stack.framework))
+    if getattr(stack, "async_runtime", ""):
+        head.append("异步运行时: " + str(stack.async_runtime))
+    if head:
+        lines.append("- " + "; ".join(head))
+    if semantics:
+        lines += [
+            "",
+            "审查时必须遵守下列语言语义(左侧直觉来自其它语言, 右侧是本项目的真实规则; "
+            "违反它们的「看起来像 bug」的结论属误报):",
+        ]
+        lines += [f"- {x}" for x in semantics]
+    if notes:
+        lines += ["", "仓库特有的语义提醒:", *[f"- {x}" for x in notes]]
+    if verified:
+        dims = "、".join(
+            f"{v.get('dimension', '?')}(由 {v.get('tool') or v.get('name') or '工具'} 负责)"
+            for v in verified
+        )
+        lines += [
+            "",
+            f"已由机器确认通过的维度: {dims}。",
+            "这些维度上的问题应由上述工具回答, 不要在审查里重复报; 确有必要报时必须说明"
+            "「为什么现有工具没拦住」(见规则 20)。",
+        ]
+    return "\n".join(lines)
 
 
 def build_messages(
@@ -155,6 +215,7 @@ def build_messages(
     repo_context: str = "",
     handled: list[tuple[str, int]] | None = None,
     feedback: list[str] | None = None,
+    stack_block: str = "",
 ) -> list[dict[str, str]]:
     """组装一轮审查的 messages([system, user])。
 
@@ -180,6 +241,8 @@ def build_messages(
         focus_text,
         "",
     ]
+    if stack_block:
+        parts += [stack_block.strip(), ""]
     if repo_context:
         parts += ["## 仓库上下文(约定/契约,判断依据,请先阅读)", "", repo_context.strip(), ""]
     if handled:

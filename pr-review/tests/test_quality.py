@@ -477,12 +477,13 @@ def _hi(file="a.py", line=1, sev=4, category="other", trigger="", detail="d", ev
 
 
 def test_downgrade_convention_high_severity():
-    """case-severity-security 形态: 纯约定违反(category=convention)判 4 → 降级 3。"""
+    """纯约定违反(category=convention)判 4 → 建议档 2(P0-5: 约定类不计门禁)。"""
     issue = _hi(sev=4, category="convention", detail="clearPolicy 返回 error 未处理",
                 evidence="策略清理失败会被静默掩盖, 造成数据不一致")
     v = per_issue_verify([issue], {"a.py": {1}})[0]
     assert v.action == ACTION_DOWNGRADE
-    assert v.new_severity == 3
+    assert v.new_severity == 2
+    assert "建议档" in v.reason
 
 
 def test_downgrade_hypothetical_wording():
@@ -514,11 +515,35 @@ def test_real_bug_not_downgraded():
     assert v.action == ACTION_KEEP
 
 
-def test_convention_severity3_untouched():
-    """约定违反但 3 级(未超门禁)不动。"""
+def test_convention_severity3_downgraded_to_advisory():
+    """P0-5(2026-09-13 拍板): 约定违反即使是 3 级(必修)也降到建议档 2。
+
+    原先的锚点"明确约定违反=3(必修不阻塞)"已废止: 约定类问题该由 ruff 与仓库约定文档
+    负责, 评审报它既重复又与门禁无关。
+    """
     issue = _hi(sev=3, category="convention")
     v = per_issue_verify([issue], {"a.py": {1}})[0]
-    assert v.action == ACTION_KEEP
+    assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
+
+
+def test_convention_already_advisory_stays_untouched():
+    """反向守卫: 已经在建议档(≤2)的约定问题不再重复降级(不产生无意义的 verdict)。"""
+    for sev in (1, 2):
+        issue = _hi(sev=sev, category="convention")
+        assert per_issue_verify([issue], {"a.py": {1}})[0].action == ACTION_KEEP
+
+
+def test_convention_tier_not_affected_by_other_signals():
+    """反向守卫: 约定档位与"高判信号"无关——带假设性措辞、自认推演都仍是 2。"""
+    variants = [
+        _hi(sev=4, category="convention", evidence="万一失败会导致权限残留"),
+        _hi(sev=4, category="convention", evidence="约定要求处理 error", detail="d"),
+        _hi(sev=5, category="convention", evidence="", detail="d"),
+    ]
+    variants[2].verification = "none: 属推演"
+    for issue in variants:
+        v = per_issue_verify([issue], {"a.py": {1}})[0]
+        assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
 
 
 # ---------------------------------------------------------------- P0-1 可验证性字段
@@ -862,7 +887,6 @@ def test_r1_2_tier_is_single_source_of_truth():
         _gate(sev=4, verification="none: 属推演", evidence="像是会有问题"),
         _gate(sev=4, verification="", evidence=""),
         _gate(sev=4, verification="", evidence="", detail="若失败则权限残留"),
-        _gate(sev=4, verification="", evidence="", category="convention"),
         _gate(sev=3, verification="", evidence=""),
     ]
     for issue in samples:
@@ -876,12 +900,20 @@ def test_r1_2_tier_is_single_source_of_truth():
             assert verdict.new_severity == tier, "per_issue_verify 必须用同一档位"
 
 
-def test_r1_2_convention_precedence_is_documented_choice():
-    """R1-2: convention + 自认推演 → 3(策略锚点优先), 这条优先级是明确选择而非漂移。"""
+def test_r1_2_convention_has_its_own_rule_not_the_tier_chain():
+    """R1-2 演进(P0-5 后): 约定违反不再挂在"高判分档链"上, 而是独立的建议档规则。
+
+    这条历史值得记住: 之前 convention 是高判链的第一优先级(→3); 用户拍板"按 P0-5 来"后
+    改为独立规则(→2), 且与 severity 是否 ≥4 无关——所以 `_high_judgement` 里不再有 convention。
+    """
     from pr_review.quality import _high_judgement
 
     issue = _gate(sev=4, verification="none: 属推演", evidence="约定违反", category="convention")
-    assert _high_judgement(issue) == (3, "convention")
+    # 分档链里没有 convention 分支了(它由 4a 规则处理)
+    assert _high_judgement(issue) == (2, "speculative")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
+    assert "建议档" in v.reason      # 且是 4a 的文案, 不是推演文案
 
 
 # ---------------------------------------------------------------- 评审 R2 回归(2026-09-13)
@@ -999,9 +1031,12 @@ def test_r4_1_structured_test_references_are_still_paths():
         "见 tests/conftest::fixture 的构造",
         "对照 tests/test_x.py::test_y (该用例挡不住, 它只覆盖 happy path)",
         "pytest tests/test_x.py -k y",
-        # 只有结构化 tests/xxx 正则能命中的形态(无 ::、无 .py、无反引号):
-        # 没有这条用例, 那条正则在变异测试里就是空转的
-        "见 tests/conftest 的 fixture, 该用例挡不住",
+        # 只有结构化 tests/xxx 正则能命中, 且带标记词(同上, 否则无法区分实现):
+        "见 tests/conftest 的 fixture; 并发场景无法验证",
+        # 只有裸 "::" 信号能命中的形态, 且**带标记词**: 只有这样, "判成有路径"(KEEP) 与
+        # "判成非推演"(也 KEEP) 才能被区分——不带标记词时两种实现给出同一结果, 用例是空转的
+        # (变异测试抓到过这一点, 这就是 R1-1 的原始场景)
+        "见 conftest::fixture 的构造(该用例挡不住); 其余场景无法验证",
     ):
         v = per_issue_verify([_gate(sev=4, verification=text)], {"a.py": {1}})[0]
         assert v.action == ACTION_KEEP, f"{text} 是具体测试引用, 不该判推演"
