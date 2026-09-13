@@ -183,19 +183,28 @@ def _looks_hypothetical(issue: Any) -> bool:
 _SPECULATION_MARKERS = (
     "推演", "推测", "无法验证", "无验证路径", "猜测", "n/a",
 )
-# 英文逃生口 "none" 只认短形式(文档约定为 "none: 属推演"):
-# 否则 "None of the existing tests cover this" 这类说明会被误判成推演, 把真问题降级
+# 英文逃生口 "none" 只认短形式(文档约定为 "none: 属推演")
 _MAX_NONE_FORM_LEN = 20
+# 标记词只在**开头窗口**内生效(2026-09-13 评审 R1-1 修复)。
+# 理由: 给了真实复现路径的 verification 常在**后半句**补充"并发场景无法验证",
+# 若整条文本做子串匹配, 这类真问题会被误判成"自认推演"并降到 2(解除阻塞)——那正是
+# P0-1 想避免的方向。约定格式是"模式先行"(① 复现路径 ② 测试名 ③ none: 属推演),
+# 所以只看开头这段"模式声明区"足够, 且不会误伤后半句的补充说明。
+_SPECULATION_HEAD_CHARS = 24
 
 
 def _verification_is_speculative(issue: Any) -> bool:
-    """LLM 是否在 verification 里自认"拿不出验证路径"(P0-1 的确定性止损口)。"""
+    """LLM 是否在 verification 里自认"拿不出验证路径"(P0-1 的确定性止损口)。
+
+    只认两种形态: ① 短形式的 none 逃生口; ② 开头窗口内出现推演类标记词。
+    """
     v = str(getattr(issue, "verification", "") or "").strip().lower()
     if not v:
         return False
-    if any(m in v for m in _SPECULATION_MARKERS):
+    if v.startswith("none") and len(v) <= _MAX_NONE_FORM_LEN:
         return True
-    return v.startswith("none") and len(v) <= _MAX_NONE_FORM_LEN
+    head = v[:_SPECULATION_HEAD_CHARS]
+    return any(m in head for m in _SPECULATION_MARKERS)
 
 
 def _has_no_basis(issue: Any) -> bool:
@@ -205,32 +214,45 @@ def _has_no_basis(issue: Any) -> bool:
     return not v and not e
 
 
-def _is_severity_high_judgement(issue: Any) -> bool:
-    """严重度高判判定(2026-08-24 三信号 + 2026-09-13 P0-1 两信号, 零成本确定性规则):
+def _high_judgement(issue: Any) -> tuple[int, str] | None:
+    """门禁级严重度高判 → (目标档位, 命中的信号); 不属高判 → None。
 
-    severity ≥4(会拦合并, 最贵的误报) 且命中任一:
-      a. 文本呈假设性措辞(若…失败/可能/万一...)
-      b. LLM 自标 trigger=hypothetical(两轴事实)
-      c. 纯约定违反(category=convention): 策略锚点"明确约定违反=3", 不应到 4
-      d. verification 自认"属推演"(P0-1): 自认拿不出验证路径
-      e. 无 verification 且无 evidence(P0-1): 无任何事实支点
-    命中 → 降级(a-c/e 到 3; d 到 2, 见 per_issue_verify 分档)。
-    """
+    **分档唯一真源**(2026-09-13 评审 R1-2): 档位与"为什么降"都在这里定, 避免
+    "是否算高判"与"降到几档"两处各写一套顺序而后漂移。
+
+    优先级(自上而下, 前者命中即定档):
+      1. 纯约定违反(category=convention)      → 3: 本仓策略锚点"明确约定违反=3"
+      2. verification 自认属推演(P0-1)        → 2: 连路径都拿不出, 映射表里"无路径"即轻微级
+      3. 假设性措辞 / trigger=hypothetical   → 3: 假设性故障最高 3(必修不阻塞)
+      4. 无 verification 且无 evidence        → 3: 无任何事实支点    """
     if int(getattr(issue, "severity", 0) or 0) < 4:
-        return False
-    if _looks_hypothetical(issue):
-        return True
-    if str(getattr(issue, "trigger", "") or "").strip().lower() == "hypothetical":
-        return True
+        return None
     if str(getattr(issue, "category", "") or "").strip().lower() == "convention":
-        return True
-    # d. 自认可验证路径属推演(none: 属推演)——自认无法证明, 不应拦合并
+        return (3, "convention")
     if _verification_is_speculative(issue):
-        return True
-    # e. 既无可验证路径也无依据: 无任何事实支点, 不应拦合并
+        return (2, "speculative")
+    if _looks_hypothetical(issue):
+        return (3, "hypothetical_wording")
+    if str(getattr(issue, "trigger", "") or "").strip().lower() == "hypothetical":
+        return (3, "trigger_hypothetical")
     if _has_no_basis(issue):
-        return True
-    return False
+        return (3, "no_basis")
+    return None
+
+
+# 命中信号 → 降级理由(P0-1 文案的唯一来源)
+_HIGH_JUDGEMENT_REASONS = {
+    "convention": "纯约定违反(策略锚点=3)",
+    "speculative": "自认可验证路径属推演(P0-1 无可验证路径)",
+    "hypothetical_wording": "证据/描述呈假设性故障",
+    "trigger_hypothetical": "LLM 自标 trigger=hypothetical",
+    "no_basis": "既无可验证路径也无判断依据",
+}
+
+
+def _is_severity_high_judgement(issue: Any) -> bool:
+    """该 issue 是否属"严重度高判"(会拦合并且应降级)。判定见 _high_judgement。"""
+    return _high_judgement(issue) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -305,26 +327,13 @@ def per_issue_verify(issues: list[Any], added_lines: dict[str, set[int]]) -> lis
 
         # 4. 严重度高判(≥4, 会拦合并) → 降级到 3(必修不阻塞)
         #    三信号: 假设性措辞 / trigger=hypothetical / category=convention(策略锚点约定违反=3)
-        if _is_severity_high_judgement(issue):
-            reason = f"严重度高判(级别 {sev} ≥4 会拦合并)"
-            # 目标级别按信号强弱分档:
-            #   自认"属推演" → 2(轻微): 连路径都拿不出, 映射表里"无路径"就该是轻微级
-            #   其余(假设性措辞/约定违反/无依据) → 3(必修不阻塞): 保留可见性但解除阻塞
-            # 优先级(自上而下, 前者命中即定档): 约定违反(策略锚点=3) >
-            #   自认推演(2) > 假设性措辞/trigger=hypothetical/无依据(3)
-            target = 3
-            if getattr(issue, "category", "") == "convention":
-                reason += ": 纯约定违反(策略锚点=3)"
-            elif _verification_is_speculative(issue):
-                reason += ": 自认可验证路径属推演(P0-1 无可验证路径)"
-                target = 2
-            elif _looks_hypothetical(issue):
-                reason += ": 证据/描述呈假设性故障"
-            elif getattr(issue, "trigger", "") == "hypothetical":
-                reason += ": LLM 自标 trigger=hypothetical"
-            elif _has_no_basis(issue):
-                reason += ": 既无可验证路径也无判断依据"
-            reason += f", 降级到 {target}"
+        high = _high_judgement(issue)
+        if high is not None:
+            target, signal = high
+            reason = (
+                f"严重度高判(级别 {sev} ≥4 会拦合并): "
+                f"{_HIGH_JUDGEMENT_REASONS.get(signal, signal)}, 降级到 {target}"
+            )
             verdicts.append(
                 IssueVerdict(issue=issue, action=ACTION_DOWNGRADE,
                              reason=reason, new_severity=target)

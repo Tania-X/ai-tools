@@ -775,3 +775,73 @@ def test_p03_judge_failure_does_not_change_issue_gate():
     result.quality_parse_failed = True
     result.quality_verdict = "judge_error"
     assert has_blocking_issues(runner.config, result) is True  # 故障不改变结论
+
+
+# ---------------------------------------------------------------- 评审 R1 回归(2026-09-13)
+def test_r1_1_real_repro_path_with_trailing_unverifiable_note_is_kept():
+    """R1-1 回归: 给了真实复现路径、后半句补充"无法验证" → 不得判成自认推演。
+
+    这是评审第 1 条给的原始例子。若标记词对整条文本做子串匹配, 这条真问题会被
+    降到 2(解除合并阻塞)——降级方向正好反了。
+    """
+    issue = _gate(
+        sev=4,
+        verification="复现: POST /api/x 传 tenant_id=abc 返回 500; 并发场景无法验证",
+        evidence="routers/x.py:31 直接取 body['tenant_id']",
+    )
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_KEEP
+
+
+def test_r1_1_speculation_still_caught_in_head_window():
+    """R1-1 反向守卫: 模式先行写的自认推演仍要被抓到(修复不能把功能一起修没)。"""
+    for text in (
+        "none: 属推演",
+        "该结论属推演, 因为拿不出可复现路径",
+        "无法验证: 由语言先验推断",
+        "n/a",
+    ):
+        v = per_issue_verify([_gate(sev=4, verification=text)], {"a.py": {1}})[0]
+        assert v.action == ACTION_DOWNGRADE, f"{text} 应被判为自认推演"
+        assert v.new_severity == 2
+
+
+def test_r1_1_none_sentence_guard_still_holds():
+    """R1-1 反向守卫: 英文长句 "None of the existing tests…" 仍不算推演。"""
+    issue = _gate(sev=4, verification="None of the existing tests cover this branch",
+                  evidence="x.py:9 未判空")
+    assert per_issue_verify([issue], {"a.py": {1}})[0].action == ACTION_KEEP
+
+
+def test_r1_2_tier_is_single_source_of_truth():
+    """R1-2: "是否算高判"与"降到几档"必须来自同一函数, 不允许两处各写一套顺序。
+
+    评审第 2 条指出的真实问题不是档位错, 而是判定逻辑分散在两处、顺序不同易漂移。
+    """
+    from pr_review.quality import _high_judgement, _is_severity_high_judgement
+
+    samples = [
+        _gate(sev=5, verification="复现: pytest tests/test_x.py::test_y 失败", evidence="x.py:1"),
+        _gate(sev=4, verification="none: 属推演", evidence="像是会有问题"),
+        _gate(sev=4, verification="", evidence=""),
+        _gate(sev=4, verification="", evidence="", detail="若失败则权限残留"),
+        _gate(sev=4, verification="", evidence="", category="convention"),
+        _gate(sev=3, verification="", evidence=""),
+    ]
+    for issue in samples:
+        high = _high_judgement(issue)
+        # 两个入口必须一致: 谓词 = 分档结果非空
+        assert _is_severity_high_judgement(issue) is (high is not None)
+        if high is not None:
+            tier, signal = high
+            assert tier in (2, 3) and signal
+            verdict = per_issue_verify([issue], {issue.file: {issue.line}})[0]
+            assert verdict.new_severity == tier, "per_issue_verify 必须用同一档位"
+
+
+def test_r1_2_convention_precedence_is_documented_choice():
+    """R1-2: convention + 自认推演 → 3(策略锚点优先), 这条优先级是明确选择而非漂移。"""
+    from pr_review.quality import _high_judgement
+
+    issue = _gate(sev=4, verification="none: 属推演", evidence="约定违反", category="convention")
+    assert _high_judgement(issue) == (3, "convention")
