@@ -186,17 +186,29 @@ class GitHubClient:
         """
         if not head_sha:
             return []
-        try:
-            data = self._get(
-                f"/repos/{self.repo}/commits/{head_sha}/check-runs",
-                params={"per_page": 100},
-            )
-        except Exception as e:  # noqa: BLE001 增强项失败不影响主流程
-            logger.warning("获取 check-runs 失败(忽略, 不做工具链注入): %s", e)
-            return []
-        runs = data.get("check_runs") if isinstance(data, dict) else None
-        if not isinstance(runs, list):
-            return []
+        # 分页(评审 R1-3): 单页上限 100, 超过会把声明在后面的工具链 check 漏掉 →
+        # 该维度被当成"未知"而不注入。与 get_pull_comments 同一套写法。
+        runs: list[dict] = []
+        page = 1
+        while True:
+            try:
+                data = self._get(
+                    f"/repos/{self.repo}/commits/{head_sha}/check-runs",
+                    params={"per_page": 100, "page": page},
+                )
+            except Exception as e:  # noqa: BLE001 增强项失败不影响主流程
+                logger.warning("获取 check-runs 失败(忽略, 不做工具链注入): %s", e)
+                return []
+            batch = data.get("check_runs") if isinstance(data, dict) else None
+            if not isinstance(batch, list):
+                return []
+            runs.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+            if page > 20:  # 兜底: 极端仓库不至于无限翻页
+                logger.warning("check-runs 分页超过 20 页, 停止拉取")
+                break
         return [
             {
                 "name": str(r.get("name", "")),

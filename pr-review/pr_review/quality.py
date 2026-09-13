@@ -271,22 +271,26 @@ def _has_no_basis(issue: Any) -> bool:
 # P0-5 规则(报告 §5): 机器已确认的维度(如 mypy 类型检查通过)上仍报问题 → 必须说明
 # "为什么现有工具没拦住"。说不出理由 = 重复劳动或无依据断言, 降级到 2(不阻塞)。
 # 依据: 15 轮实测里, "类型对不对/测试覆盖没覆盖"本属工具职责, 评审只能靠语言先验猜。
+# 只收**缺口式**说法(评审 R1-2): 早先含裸 "检查范围" / "exclude", 会把"该问题在检查范围内,
+# mypy 本应抓到"这类**相反语义**的表述也算成"已解释缺口" → 本该降级的门禁级问题被保留。
+# 注意"漏"这类单字不收(会命中"漏洞"); 只收明确的否定/缺失短语。
 _GAP_MARKERS = (
-    "未覆盖", "不在检查范围", "检查范围", "未纳入", "漏检", "未检查", "没有检查",
-    "noqa", "type: ignore", "exclude", "excluded", "ignore 掉", "未启用", "未配置",
+    "未覆盖", "不在检查范围", "未纳入", "漏检", "未检查", "没有检查", "未被检查",
+    "noqa", "type: ignore", "excluded", "exclude 掉", "ignore 掉",
+    "未启用", "未配置", "未跑", "没跑", "未接", "未装", "缺失", "不在 files", "改名",
 )
 
 
-def _mentions_tool_gap(issue: Any, tool: str) -> bool:
+def _mentions_tool_gap(issue: Any, tool: str = "") -> bool:
     """issue 是否解释了"为什么现有工具没拦住"(P0-5)。
 
-    两条路径任一命中即可: ① 文本里点了工具名(mypy/ruff...)并说明情况;
-    ② 出现"未覆盖/不在检查范围/noqa/type: ignore"这类明确缺口说法。
+    **只认缺口式表述**(未覆盖/不在检查范围/缺失/noqa/type: ignore …)。
+    早先还有一条"文本里出现工具名就算"——那是裸子串: "mypy 本应抓到却没有"同样命中,
+    等于把相反语义当成解释, 与评审 R1-2 指出的缺陷同族(修复时被自己的测试抓出来)。
+    参数 tool 不参与判定, 仅供调用方拼理由文案。
     """
     hay = " ".join(str(getattr(issue, f, "") or "") for f in
                    ("detail", "evidence", "verification", "suggestion")).lower()
-    if tool and tool.lower() in hay:
-        return True
     return any(m in hay for m in _GAP_MARKERS)
 
 

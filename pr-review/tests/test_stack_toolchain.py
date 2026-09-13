@@ -213,17 +213,27 @@ def test_p05_downgrades_covered_dimension_without_gap_explanation():
     assert "mypy" in v.reason
 
 
-def test_p05_keeps_when_gap_explained_by_tool_name():
-    """只提工具名(不含"未覆盖/未检查"等标记词)也必须算作已解释缺口。
+def test_p05_keeps_when_gap_stated_without_common_markers():
+    """缺口用"缺失/改名"这类说法讲清楚时也要算数(不能只认"未覆盖"那几个词)。
 
-    这条单独存在是有原因的: 另一条用例的文本同时命中了标记词, 若只测那一条,
-    "点了工具名"这条路径就是空转的(变异测试曾抓到这一点)。
+    (这条原本钉的是"点了工具名就算", 评审 R1-2 之后那个机制已删除——见下面那条用例。)
     """
     issue = _issue(verification="该类型问题由 mypy 负责, 本次该 check 在 CI 里缺失(仓库改名)")
     hay = " ".join([issue.detail, issue.evidence, issue.verification, issue.suggestion])
-    assert not any(m in hay for m in ("未覆盖", "未检查", "noqa", "type: ignore")), "本用例必须只走工具名路径"
+    assert not any(m in hay for m in ("未覆盖", "未检查", "noqa", "type: ignore")), "本用例须只走缺失式表述"
     v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
     assert v.action == ACTION_KEEP
+
+
+def test_p05_mentioning_tool_name_is_not_a_gap_explanation():
+    """评审 R1-2 同族: 只"提到工具名"不算解释缺口, 否则相反语义也会被放过。
+
+    "mypy 本应抓到却没有"里出现了 mypy, 但它恰恰在说工具**应该**抓到——不是缺口说明。
+    """
+    issue = _issue(detail="mypy 本应抓到却没有", category="type_consistency", severity=4)
+    issue.verification = "见 a.py:12 的类型标注"
+    v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
+    assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
 
 
 def test_p05_keeps_when_gap_explained_by_ignore_marker():
@@ -366,3 +376,65 @@ def test_p05_rule_uses_single_source_of_truth():
     src = inspect.getsource(review_mod.ReviewRunner._quality_loop_inner)
     assert "verified_dimensions=result.verified_dimensions" in src
     assert "_verified_dimension_tools(pr)" not in src
+
+
+# --------------------------------------------------------------- 评审 R1-2 / R1-3 回归
+def test_r1_2_positive_phrasing_is_not_a_gap_explanation():
+    """R1-2 回归: "在检查范围内, 工具本应抓到"是**相反语义**, 不能算已解释缺口。
+
+    修复前 `_GAP_MARKERS` 含裸 "检查范围", 它是 "在检查范围内" 的子串 → 命中 → 保留不降级
+    → 规则 4c 失效(门禁级问题照旧拦合并)。
+    """
+    issue = _issue(
+        detail="该问题在检查范围内, mypy 本应抓到却没有",
+        verification="见 a.py:12 的类型标注", category="type_consistency", severity=4,
+    )
+    v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
+    assert v.action == ACTION_DOWNGRADE and v.new_severity == 2
+
+
+def test_r1_2_negative_phrasings_still_count():
+    """R1-2 反向守卫: 真正的缺口式说法仍被认可(修复不能把功能修没)。"""
+    for text in (
+        "mypy 未覆盖该文件",
+        "该文件不在检查范围(mypy files 未含 tests/)",
+        "该行有 # type: ignore 掩盖了不一致",
+        "此规则 excluded, 未纳入检查",
+    ):
+        issue = _issue(detail=text, category="type_consistency", severity=4)
+        issue.verification = "见 a.py:12 的类型标注"
+        v = per_issue_verify([issue], {"a.py": {1}}, verified_dimensions={"typing": "mypy"})[0]
+        assert v.action == ACTION_KEEP, f"{text} 是缺口说明, 应保留原级"
+
+
+def test_r1_3_check_runs_pagination_collects_all_pages():
+    """R1-3 回归: check-run 超过一页时不能漏(漏掉 → 该维度被当成"未知"而不注入)。"""
+    from pr_review.github import GitHubClient
+
+    client = GitHubClient(token="t", repo="o/r", pr_number=1)
+    page1 = [{"name": f"check-{i}", "conclusion": "success", "status": "completed"} for i in range(100)]
+    page2 = [{"name": "Type check (mypy)", "conclusion": "success", "status": "completed"}]
+    calls: list[dict] = []
+
+    def fake_get(path, params=None):
+        calls.append(params or {})
+        return {"check_runs": page1 if (params or {}).get("page") == 1 else page2}
+
+    with patch.object(client, "_get", side_effect=fake_get):
+        runs = client.get_check_runs("abc")
+    assert len(runs) == 101
+    assert runs[-1]["name"] == "Type check (mypy)"     # 第二页里的声明项没有丢
+    assert [c.get("page") for c in calls] == [1, 2]     # 拉了两页就停
+
+
+def test_r1_3_check_runs_single_page_no_extra_request():
+    """R1-3 反向守卫: 不足一页时只请求一次(别为凑页数多打 API)。"""
+    from pr_review.github import GitHubClient
+
+    client = GitHubClient(token="t", repo="o/r", pr_number=1)
+    calls: list[dict] = []
+    with patch.object(client, "_get", side_effect=lambda path, params=None: (
+        calls.append(params or {}) or {"check_runs": [{"name": "ci", "conclusion": "success"}]}
+    )):
+        runs = client.get_check_runs("abc")
+    assert len(runs) == 1 and [c.get("page") for c in calls] == [1]
