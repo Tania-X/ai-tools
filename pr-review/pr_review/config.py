@@ -235,6 +235,11 @@ def load_config(path: str | Path | None = None) -> ReviewConfig:
             cfg.quality_gate.enabled = bool(qg["enabled"])
         if qg.get("judge_model"):
             cfg.quality_gate.judge_model = str(qg["judge_model"])
+        # judge 可独立 provider（如便宜模型 / 消除同源自评偏差）。
+        # quality.py 会读取该字段路由 judge 调用，但此前加载器漏了这一步，
+        # 导致文档承诺的 judge_provider 被静默忽略 —— 由 test_load_config_quality_gate 守护。
+        if qg.get("judge_provider"):
+            cfg.quality_gate.judge_provider = str(qg["judge_provider"])
         cfg.quality_gate.pass_score = int(qg.get("pass_score", cfg.quality_gate.pass_score))
         cfg.quality_gate.max_rewrites = int(qg.get("max_rewrites", cfg.quality_gate.max_rewrites))
         cfg.quality_gate.max_judge_input_chars = int(
