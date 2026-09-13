@@ -9,11 +9,21 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .config import QualityConfig, SEVERITIES
 from .prompt import parse_review_json
+
+logger = logging.getLogger(__name__)
+
+# P0-3: judge 输出无法解析时的一次严格重试指令
+RETRY_JSON_INSTRUCTION = (
+    "上一次输出无法解析为 JSON。请只输出一个 JSON 对象, 不要任何解释文字、"
+    'Markdown 围栏或前后缀, 形如 {"score": 0-100, "verdict": "pass|rewrite", "reasons": [...]}。'
+)
 
 JUDGE_SYSTEM_PROMPT = """你是代码审查质量评估员,对 AI 审查产出打分。
 评分维度(rubric):
@@ -23,6 +33,9 @@ JUDGE_SYSTEM_PROMPT = """你是代码审查质量评估员,对 AI 审查产出�
 - 噪音: 是否过度挑剔无关紧要的问题
 - 严重度与证据匹配(2026-08-19 P1): issue 的 trigger/impact 判断是否与 evidence 一致。
   证据是假设性故障("若 X 失败则…")却判 high/real → 严重度高判(最贵的误报, 会误拦合并), 必须扣分。
+- 可验证性(P0-1, 2026-08-13): 会拦合并的 issue(≥4)是否给了可验证路径(verification):
+  复现输入/命令、能反驳它的现有测试, 或明确标注"属推演"。verification 为空且 evidence 也是空话,
+  或自认属推演却判 ≥4 → 扣分(不可证伪的结论会误拦合并)。
 
 评分规则:
 - 若 issues 为空数组:
@@ -41,6 +54,10 @@ class JudgeResult:
     score: int = 0
     verdict: str = "rewrite"  # pass / rewrite
     reasons: list[str] = field(default_factory=list)
+    # P0-3(判官故障留档): 输出无法解析时 parse_failed=True, raw 留原始输出(截断)。
+    # 与"judge 正常给出低分"必须区分: 前者是工具故障(不可知), 后者是真实判负。
+    parse_failed: bool = False
+    raw: str = ""
 
 
 class Judge:
@@ -65,7 +82,44 @@ class Judge:
         if self.config.judge_provider:
             kwargs["provider"] = self.config.judge_provider
         resp = self.llm.chat(messages, **kwargs)
-        return self._parse(resp.content)
+        parsed = self._parse(resp.content)
+        if not parsed.parse_failed:
+            return parsed
+        # P0-3: 解析失败先重试一次(明确要求纯 JSON 输出, 不带解释/围栏)。
+        # 线上故障(x2 次/15 轮)多为"输出前后带说明文字"导致, 一次严格重试即可救回。
+        logger.warning(
+            "judge 输出无法解析, 重试一次(原文前 200 字): %s",
+            (resp.content or "")[:200],
+        )
+        # R2-2(评审第 2 轮): 不能直接 append 第二条 user 消息——部分 provider(Anthropic 格式
+        # 端点)要求 user/assistant 交替, 连续两条 user 会被 400 拒掉; 故并入最后一条 user 消息。
+        retry_messages = messages[:-1] + [
+            {
+                "role": "user",
+                "content": (messages[-1]["content"] if messages else "")
+                + "\n\n" + RETRY_JSON_INSTRUCTION,
+            },
+        ]
+        try:
+            retry = self.llm.chat(retry_messages, **kwargs)
+        except Exception as e:  # noqa: BLE001 重试失败按"判官故障"处理, 不冒泡打断整轮审查
+            logger.error("judge 重试调用失败, 按判官故障处理: %s", e)
+            return parsed
+        parsed_retry = self._parse(retry.content)
+        if not parsed_retry.parse_failed:
+            logger.info("judge 严格重试成功")
+            return parsed_retry
+        # R1-4(评审第 1 轮): 两次原文都要留档——首次输出往往才是真实故障形态,
+        # 只留重试那次会让"日志过期后无法复盘"。
+        if parsed_retry.raw:
+            parsed_retry.raw = (
+                f"[first]\n{parsed.raw}\n[retry]\n{parsed_retry.raw}"
+            )
+        logger.error(
+            "judge 连续 2 次输出无法解析, 本轮质量评分不可用(两次原文留档): %s",
+            parsed_retry.raw[:500],
+        )
+        return parsed_retry
 
     @staticmethod
     def _parse(content: str) -> JudgeResult:
@@ -78,7 +132,11 @@ class Judge:
             reasons = [str(r) for r in (data.get("reasons") or [])]
             return JudgeResult(score=score, verdict=verdict, reasons=reasons)
         except ValueError:
-            return JudgeResult(score=0, verdict="rewrite", reasons=["judge 输出无法解析"])
+            return JudgeResult(
+                score=0, verdict="rewrite",
+                reasons=["judge 输出无法解析(judge 故障, 非审查结论)"],
+                parse_failed=True, raw=(content or "")[:500],
+            )
 
 
 def structural_signals(
@@ -87,7 +145,8 @@ def structural_signals(
     """零成本结构校验,产出 judge 参考信号(不直接否决 LLM 输出)。
 
     校验项: 行号缺失 / 行号不在 diff 新增行(疑似幻觉) / severity 越界(1-5) /
-    严重度高判(2026-08-19 P1: 证据是假设性故障但级别 ≥4)。
+    严重度高判(2026-08-19 P1: 证据是假设性故障但级别 ≥4) /
+    可验证性(P0-1, 2026-09-13: ≥3 缺 evidence / ≥4 无任何事实支点 / 自认推演却判 ≥4)。
     """
     signals: list[str] = []
     for issue in issues:
@@ -95,6 +154,24 @@ def structural_signals(
             signals.append(f"{issue.file}: 行号缺失(无法定位到 diff 行)")
         elif added_lines.get(issue.file) and issue.line not in added_lines[issue.file]:
             signals.append(f"{issue.file}:{issue.line} 不在 diff 新增行(疑似幻觉)")
+        # P0-1 规则一(报告): severity ≥3 必须有 evidence(file:line + 代码片段)。
+        # 3 级本就不阻塞, 故只出信号给 judge, 不降级(降 3→2 会白丢"必修"标记)
+        if issue.severity >= 3 and not str(getattr(issue, "evidence", "") or "").strip():
+            signals.append(
+                f"{issue.file}:{issue.line} 级别 {issue.severity}(≥3)缺判断依据(evidence 为空)"
+            )
+        # 门禁级问题缺任何事实支点(P0-1): 无 verification 且无 evidence → 提示 judge。
+        # 注意只靠"verification 字段为空"不报: evidence 本身可能就是验证路径,
+        # 那样会把确定性证据的真问题(如"第21行必有 nil")一起标成可疑, 属噪音。
+        if issue.severity >= 4 and _has_no_basis(issue):
+            signals.append(
+                f"{issue.file}:{issue.line} 门禁级(≥4)既无可验证路径也无判断依据(疑似推演)"
+            )
+        # 自认可验证路径属推演却判门禁级 → 提示 judge
+        if issue.severity >= 4 and _verification_is_speculative(issue):
+            signals.append(
+                f"{issue.file}:{issue.line} 自认可验证路径属推演, 但级别为 {issue.severity}(≥4 会拦合并)"
+            )
         # 严重度高判: 假设性故障证据 + 高级别(≥4 会拦合并, 最贵的误报)
         if issue.severity >= 4 and _looks_hypothetical(issue):
             signals.append(
@@ -119,24 +196,98 @@ def _looks_hypothetical(issue: Any) -> bool:
     return any(m in hay for m in _HYPOTHETICAL_MARKERS)
 
 
-def _is_severity_high_judgement(issue: Any) -> bool:
-    """严重度高判判定(2026-08-24 三信号 OR, 零成本确定性规则):
+# P0-1: verification 里"自认可验证路径属推演"的标记词
+_SPECULATION_MARKERS = (
+    "推演", "推测", "无法验证", "无验证路径", "猜测",
+    # 同义的自认说法(2026-09-13 评审 R2: 只覆盖"无法验证"会漏掉这些常见写法)
+    "无法给出", "无法提供", "拿不出", "无法复现", "无复现路径",
+)
+# 具体验证路径的特征(2026-09-13 评审 R2-1): 只要 verification 里给出了**具体可复现的东西**,
+# 就不能再判成"自认推演"——一个通用词(如 n/a)或一句补充说明, 不能盖过已经给出的路径。
+# 方向性理由: 误判成推演会降到 2 并解除阻塞, 属"把真问题放走"; 反之只是多留一条问题。
+_PATH_SIGNALS = ("::", "tests/", "test_", "http://", "https://")
+_PATH_PATTERNS = (
+    re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+/", re.I),
+    re.compile(r"`[^`]{3,}`"),                       # 反引号里的命令/片段
+    re.compile(r"\b[\w-]+\.(py|js|ts|go|java|rb|sh)\b"),  # 具体文件
+)
 
-    severity ≥4(会拦合并, 最贵的误报) 且命中任一:
-      a. 文本呈假设性措辞(若…失败/可能/万一...)
-      b. LLM 自标 trigger=hypothetical(两轴事实)
-      c. 纯约定违反(category=convention): 策略锚点"明确约定违反=3", 不应到 4
-    命中 → 应由质量门降到 3(必修不阻塞)。
+
+def _looks_like_verification_path(v: str) -> bool:
+    """verification 里是否已给出具体可复现的东西(pytest 节点 id / 命令 / 具体文件 / 请求)。"""
+    if any(sig in v for sig in _PATH_SIGNALS):
+        return True
+    return any(pat.search(v) for pat in _PATH_PATTERNS)
+# 逃生口 "none" / "n/a" 只认短形式(文档约定为 "none: 属推演")
+_MAX_NONE_FORM_LEN = 20
+def _verification_is_speculative(issue: Any) -> bool:
+    """LLM 是否在 verification 里自认"拿不出验证路径"(P0-1 的确定性止损口)。
+
+    判定顺序(两条规则, 不再有"头部窗口"这种第三条):
+      ① 已给出具体路径(节点 id / 命令 / 文件 / 请求) → 不算推演(路径优先)
+      ② 短形式逃生口("none…" / "n/a…")              → 算推演
+      ③ 文本里出现推演类标记词                        → 算推演
+
+    演进说明(2026-09-13): R1 曾用"只看开头 24 字"来避免"路径 + 后半句补充说明"被误判。
+    R2 引入路径优先判定后, 头部窗口变成多余且有害(会漏掉"无路径但把自认写在后面"的情况),
+    故删除——现在只有"有没有给出具体路径"一个判据。
     """
-    if int(getattr(issue, "severity", 0) or 0) < 4:
+    v = str(getattr(issue, "verification", "") or "").strip().lower()
+    if not v:
         return False
-    if _looks_hypothetical(issue):
+    if _looks_like_verification_path(v):
+        return False
+    if v.startswith(("none", "n/a")) and len(v) <= _MAX_NONE_FORM_LEN:
         return True
-    if str(getattr(issue, "trigger", "") or "").strip().lower() == "hypothetical":
-        return True
+    return any(m in v for m in _SPECULATION_MARKERS)
+
+
+def _has_no_basis(issue: Any) -> bool:
+    """门禁级问题既无可验证路径、也无判断依据 → 典型的严重度高判(报告分类 B)。"""
+    v = str(getattr(issue, "verification", "") or "").strip()
+    e = str(getattr(issue, "evidence", "") or "").strip()
+    return not v and not e
+
+
+def _high_judgement(issue: Any) -> tuple[int, str] | None:
+    """门禁级严重度高判 → (目标档位, 命中的信号); 不属高判 → None。
+
+    **分档唯一真源**(2026-09-13 评审 R1-2): 档位与"为什么降"都在这里定, 避免
+    "是否算高判"与"降到几档"两处各写一套顺序而后漂移。
+
+    优先级(自上而下, 前者命中即定档):
+      1. 纯约定违反(category=convention)      → 3: 本仓策略锚点"明确约定违反=3"
+      2. verification 自认属推演(P0-1)        → 2: 连路径都拿不出, 映射表里"无路径"即轻微级
+      3. 假设性措辞 / trigger=hypothetical   → 3: 假设性故障最高 3(必修不阻塞)
+      4. 无 verification 且无 evidence        → 3: 无任何事实支点    """
+    if int(getattr(issue, "severity", 0) or 0) < 4:
+        return None
     if str(getattr(issue, "category", "") or "").strip().lower() == "convention":
-        return True
-    return False
+        return (3, "convention")
+    if _verification_is_speculative(issue):
+        return (2, "speculative")
+    if _looks_hypothetical(issue):
+        return (3, "hypothetical_wording")
+    if str(getattr(issue, "trigger", "") or "").strip().lower() == "hypothetical":
+        return (3, "trigger_hypothetical")
+    if _has_no_basis(issue):
+        return (3, "no_basis")
+    return None
+
+
+# 命中信号 → 降级理由(P0-1 文案的唯一来源)
+_HIGH_JUDGEMENT_REASONS = {
+    "convention": "纯约定违反(策略锚点=3)",
+    "speculative": "自认可验证路径属推演(P0-1 无可验证路径)",
+    "hypothetical_wording": "证据/描述呈假设性故障",
+    "trigger_hypothetical": "LLM 自标 trigger=hypothetical",
+    "no_basis": "既无可验证路径也无判断依据",
+}
+
+
+def _is_severity_high_judgement(issue: Any) -> bool:
+    """该 issue 是否属"严重度高判"(会拦合并且应降级)。判定见 _high_judgement。"""
+    return _high_judgement(issue) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +323,10 @@ def per_issue_verify(issues: list[Any], added_lines: dict[str, set[int]]) -> lis
     1. 行号缺失(0 或 None) → delete(无法定位到 diff 行, 疑似幻觉)
     2. 行号不在 diff 新增行 → delete(疑似幻觉; 只评本 PR 引入的问题)
     3. severity 越界(非 1-5) → fix(钳制到合法范围)
-    4. 假设性证据 + 级别 ≥4 → downgrade 到 3(最高级误报: 会拦合并)
-       - 级别由两轴事实映射, 假设性触发最多 3(必修不阻塞)
+    4. 假设性证据 / LLM 自标 trigger=hypothetical / 纯约定违反 /
+       门禁级(≥4)但既无 verification 又无 evidence → downgrade 到 3(必修不阻塞)
+    4b. 自认可验证路径属推演(none: 属推演)+ 级别 ≥4 → downgrade 到 2(轻微)
+       - 报告 P0-1 指定; 与 severity 映射表"无路径→轻微"一致
     5. 其余 → keep
 
     返回 verdict 列表(与 issues 一一对应)。
@@ -209,18 +362,16 @@ def per_issue_verify(issues: list[Any], added_lines: dict[str, set[int]]) -> lis
 
         # 4. 严重度高判(≥4, 会拦合并) → 降级到 3(必修不阻塞)
         #    三信号: 假设性措辞 / trigger=hypothetical / category=convention(策略锚点约定违反=3)
-        if _is_severity_high_judgement(issue):
-            reason = f"严重度高判(级别 {sev} ≥4 会拦合并)"
-            if getattr(issue, "category", "") == "convention":
-                reason += ": 纯约定违反(策略锚点=3)"
-            elif _looks_hypothetical(issue):
-                reason += ": 证据/描述呈假设性故障"
-            elif getattr(issue, "trigger", "") == "hypothetical":
-                reason += ": LLM 自标 trigger=hypothetical"
-            reason += ", 降级到 3"
+        high = _high_judgement(issue)
+        if high is not None:
+            target, signal = high
+            reason = (
+                f"严重度高判(级别 {sev} ≥4 会拦合并): "
+                f"{_HIGH_JUDGEMENT_REASONS.get(signal, signal)}, 降级到 {target}"
+            )
             verdicts.append(
                 IssueVerdict(issue=issue, action=ACTION_DOWNGRADE,
-                             reason=reason, new_severity=3)
+                             reason=reason, new_severity=target)
             )
             continue
 
