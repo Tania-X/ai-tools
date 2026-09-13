@@ -35,6 +35,25 @@ def _format_counts(counts: dict[int, int]) -> str:
     )
 
 
+def check_run_payload(
+    result: ReviewResult,
+    blocked: bool,
+    cfg: ReviewConfig,
+    *,
+    judge_failed: bool = False,
+) -> tuple[str, str]:
+    """check-run 的 (title, summary)。
+
+    judge 故障只在**标题**加标记: 正文里的解释由 check_summary 单一来源给出
+    (2026-09-13 评审 R1-3: 原先 main.py 又拼了一段同类文字, 同一事实在 check 里出现两次)。
+    """
+    title = check_title(result, blocked, cfg)
+    summary = check_summary(result, cfg)
+    if judge_failed:
+        title += " · judge 故障"
+    return title, summary
+
+
 def has_blocking_issues(cfg: ReviewConfig, result: ReviewResult) -> bool:
     """是否达到合并门禁(fail_on_severity)级别的问题。
 
@@ -95,6 +114,7 @@ def check_summary(result: ReviewResult, cfg: ReviewConfig) -> str:
         lines.append(f"- 质量评分: {result.quality_score:.0f}/100")
     elif getattr(result, "quality_parse_failed", False):
         lines.append("- 质量评分: 不可用(judge 输出无法解析, 工具故障; 未做质量评估)")
+        lines.append("- 说明: 按「评分与门禁解耦」, 本轮 issue 门禁判定不受评审故障影响")
     if result.skipped_files:
         lines.append(f"- 跳过文件: {result.skipped_files}")
     return "\n".join(lines)

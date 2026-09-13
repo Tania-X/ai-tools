@@ -724,6 +724,42 @@ def test_p03_comment_marks_gate_not_effective():
     assert "质量未达标" not in comment  # 不能写成"判负"(那是另一回事)
 
 
+def test_r1_3_judge_failure_explained_exactly_once():
+    """R1-3 回归: judge 故障的说明在 check 文案里只能出现一次(原先 output.py 与 main.py 各写一遍)。"""
+    from pr_review.output import check_run_payload
+
+    runner, _, _ = _quality_runner([])
+    result = ReviewResult(review_no=1)
+    result.quality_parse_failed = True
+    result.quality_verdict = "judge_error"
+    result.issues = [_issue(file="a.py", line=1, severity=2)]
+    title, summary = check_run_payload(result, False, runner.config, judge_failed=True)
+    assert title.endswith("judge 故障")
+    assert summary.count("judge") == 1, f"judge 故障说明重复: {summary}"
+    assert "评分与门禁解耦" in summary
+
+    # 反向守卫: 正常轮次不得出现 judge 故障标记
+    ok_title, ok_summary = check_run_payload(ReviewResult(), False, runner.config)
+    assert "judge" not in ok_title and "不可用" not in ok_summary
+
+
+def test_r1_4_archives_both_judge_raw_outputs():
+    """R1-4 回归: 两次都解析失败时, 首次与重试的原文都要留档(首次才是真实故障形态)。"""
+    from pr_review.quality import Judge
+
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(content="首次输出: 我觉得这个 PR 不错", model="m", provider="p", usage={}),
+        ChatResponse(content="重试输出: 依然不是 JSON", model="m", provider="p", usage={}),
+    ]
+    jr = Judge(llm=llm, config=QualityConfig(pass_score=70)).evaluate(
+        ReviewResult(added_lines={}), "diff"
+    )
+    assert jr.parse_failed is True
+    assert "[first]" in jr.raw and "我觉得这个 PR 不错" in jr.raw
+    assert "[retry]" in jr.raw and "依然不是 JSON" in jr.raw
+
+
 def test_p03_comment_archives_judge_raw_output():
     """P0-3: judge 原文进评论折叠块留档(只写日志的话, 日志过期就查不出来了)。"""
     runner, _, _ = _quality_runner([])
@@ -758,6 +794,7 @@ def test_p03_stats_footer_reports_unavailable_score():
     summary = check_summary(result, runner.config)
     assert "不可用" in summary
     assert "0/100" not in summary
+    assert "评分与门禁解耦" in summary      # R1-3: 政策说明也在同一处给出
 
 
 def test_p03_judge_failure_does_not_change_issue_gate():

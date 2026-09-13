@@ -109,9 +109,15 @@ class Judge:
         if not parsed_retry.parse_failed:
             logger.info("judge 严格重试成功")
             return parsed_retry
+        # R1-4(评审第 1 轮): 两次原文都要留档——首次输出往往才是真实故障形态,
+        # 只留重试那次会让"日志过期后无法复盘"。
+        if parsed_retry.raw:
+            parsed_retry.raw = (
+                f"[first]\n{parsed.raw}\n[retry]\n{parsed_retry.raw}"
+            )
         logger.error(
-            "judge 连续 2 次输出无法解析, 本轮质量评分不可用(原文留档前 500 字): %s",
-            (retry.content or resp.content or "")[:500],
+            "judge 连续 2 次输出无法解析, 本轮质量评分不可用(两次原文留档): %s",
+            parsed_retry.raw[:500],
         )
         return parsed_retry
 

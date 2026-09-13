@@ -35,7 +35,10 @@ from pr_review.config import load_config as load_review_config  # noqa: E402
 from pr_review.config import ReviewConfig  # noqa: E402
 from pr_review.context import ContextCollector  # noqa: E402
 from pr_review.github import GitHubClient, GitHubError  # noqa: E402
-from pr_review.output import check_summary, check_title, has_blocking_issues  # noqa: E402
+from pr_review.output import (  # noqa: E402
+    check_run_payload,
+    has_blocking_issues,
+)
 from pr_review.review_platform import ReviewPlatform  # noqa: E402
 from pr_review.review import ReviewRunner, ToolLoopError  # noqa: E402
 
@@ -215,14 +218,10 @@ def main() -> None:
         # check-run 合并门禁:达到 fail_on_severity 门槛 → failure(check 红)
         # 注意:权限不足(旧 workflow 无 checks: write)时仅告警,不中断已发布的评论
         blocked = has_blocking_issues(review_cfg, result)
-        check_title_txt = check_title(result, blocked, review_cfg)
-        check_summary_txt = check_summary(result, review_cfg)
-        if judge_failed:
-            check_title_txt += " · judge 故障"
-            check_summary_txt += (
-                "\n- 注: judge 连续 2 次输出无法解析(工具故障), 本轮质量评分不可用; "
-                "按「评分与门禁解耦」, issue 门禁判定不受影响"
-            )
+        # 文案单一来源: judge 故障的说明由 check_summary 给出, 这里只加标题标记(评审 R1-3)
+        check_title_txt, check_summary_txt = check_run_payload(
+            result, blocked, review_cfg, judge_failed=judge_failed
+        )
         try:
             platform.create_check_run(
                 "AI Review",
