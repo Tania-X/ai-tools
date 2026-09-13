@@ -519,3 +519,259 @@ def test_convention_severity3_untouched():
     issue = _hi(sev=3, category="convention")
     v = per_issue_verify([issue], {"a.py": {1}})[0]
     assert v.action == ACTION_KEEP
+
+
+# ---------------------------------------------------------------- P0-1 可验证性字段
+def _gate(sev=4, verification="", evidence="e", **kw):
+    """门禁级(≥4)issue 构造器(P0-1 用例)。"""
+    return ReviewIssue(
+        file=kw.pop("file", "a.py"), line=kw.pop("line", 1), severity=sev,
+        title="t", detail=kw.pop("detail", "d"), suggestion="s",
+        evidence=evidence, verification=verification, **kw,
+    )
+
+
+def test_p01_speculative_verification_downgrades_gate_level():
+    """P0-1: LLM 自认可验证路径属推演(none: 属推演)+ 门禁级 → 降级到 2(轻微)。
+
+    比"无依据"更弱一档: 自认拿不出路径 = 映射表里的"无路径", 按报告 P0-1 降到轻微级。
+    """
+    issue = _gate(sev=4, verification="none: 属推演", evidence="看代码像是会有问题")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_DOWNGRADE
+    assert v.new_severity == 2
+    assert "推演" in v.reason
+
+
+def test_p01_english_none_sentence_is_not_speculation():
+    """P0-1 反向守卫: "None of the tests cover this" 是说明而非自认推演 → 不降级。
+
+    只认文档约定的短形式(none: 属推演), 否则英文句子会被误判成推演, 真问题被降级。
+    """
+    issue = _gate(
+        sev=5, verification="None of the existing tests cover this branch",
+        evidence="第 21 行 user 未判空即解引用 .Name",
+    )
+    assert per_issue_verify([issue], {"a.py": {1}})[0].action == ACTION_KEEP
+
+
+def test_p01_missing_verification_with_evidence_is_kept():
+    """P0-1: verification 为空但 evidence 是事实锚点 → 不降级(避免误伤真问题)。
+
+    这是"字段缺失"与"无依据"的分界: 只凭新字段缺失就降级, 会让不认新字段的模型
+    把所有门禁级问题一起降级, 属严重信号丢失。
+    """
+    issue = _gate(sev=5, verification="", evidence="第 21 行 user 未判空即解引用 .Name")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_KEEP
+
+
+def test_p01_gate_level_without_any_basis_downgrades():
+    """P0-1: 门禁级但既无 verification 也无 evidence → 无事实支点, 降级到 3(不是 2)。
+
+    与"自认推演"分档: 无依据仍是"未说明", 保留必修可见性; 自认推演才算轻微级。
+    """
+    issue = _gate(sev=4, verification="", evidence="")
+    v = per_issue_verify([issue], {"a.py": {1}})[0]
+    assert v.action == ACTION_DOWNGRADE
+    assert v.new_severity == 3
+    assert "依据" in v.reason or "验证" in v.reason
+
+
+def test_p01_level3_without_evidence_only_signals():
+    """P0-1: ≥3 缺 evidence 只出信号(交 judge 参考), 不降级 3→2(白丢"必修"标记)。"""
+    issue = _gate(sev=3, verification="", evidence="")
+    assert per_issue_verify([issue], {"a.py": {1}})[0].action == ACTION_KEEP
+    signals = structural_signals([issue], {"a.py": {1}})
+    assert any("缺判断依据" in s for s in signals)
+
+
+def test_p01_below_gate_level_untouched():
+    """P0-1 只针对门禁级: 3 级问题没有 verification 也不动(不降级)。"""
+    issue = _gate(sev=3, verification="", evidence="")
+    assert per_issue_verify([issue], {"a.py": {1}})[0].action == ACTION_KEEP
+
+
+def test_p01_structural_signal_flags_baseless_gate_level():
+    """P0-1: 无任何事实支点的门禁级问题出信号; 有 evidence 的不出(避免噪音)。"""
+    issues = [
+        _gate(sev=4, verification="", evidence=""),                       # 无支点
+        _gate(sev=5, verification="", evidence="第 21 行必有 nil", file="b.py"),
+        _gate(sev=4, verification="none: 属推演", evidence="嗯", file="c.py"),
+    ]
+    signals = structural_signals(issues, {"a.py": {1}, "b.py": {1}, "c.py": {1}})
+    assert any("a.py:1" in s and "无可验证路径" in s for s in signals)
+    assert any("c.py:1" in s and "推演" in s for s in signals)
+    assert not any("b.py" in s for s in signals)
+
+
+def test_p01_review_issue_parses_verification_field():
+    """P0-1: LLM 输出里的 verification 要落进 ReviewIssue(否则模型写了也没用)。"""
+    issue = ReviewIssue.from_dict({
+        "file": "a.py", "line": 3, "severity": "blocker", "title": "t",
+        "detail": "d", "suggestion": "s", "evidence": "e",
+        "verification": "POST /api/x 传 tenant_id=abc 返回 500",
+    })
+    assert issue.verification.startswith("POST /api/x")
+
+
+def test_p01_prompt_requires_verification():
+    """P0-1: prompt 规则 18 + JSON schema 必须要求 verification(模型只按 prompt 走)。"""
+    from pr_review.prompt import SYSTEM_PROMPT
+
+    assert "可验证性" in SYSTEM_PROMPT
+    assert "verification" in SYSTEM_PROMPT
+    assert "属推演" in SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------- P0-3 判官故障留档
+def test_p03_parse_failure_marks_flag_and_keeps_raw():
+    """P0-3: 解析失败必须显式(parse_failed=True)+ 原文留档, 且不伪装成"0 分判负"。"""
+    from pr_review.quality import Judge
+
+    jr = Judge._parse("我觉得这个 PR 挺好的, 但有几点建议…")
+    assert jr.parse_failed is True
+    assert jr.raw.startswith("我觉得这个 PR")
+    assert jr.verdict == "rewrite"
+    assert any("judge" in r for r in jr.reasons)  # 说明是 judge 故障, 不是审查结论
+
+
+def test_p03_normal_parse_has_no_flag():
+    """P0-3 反向守卫: 正常解析不能被误标为故障(否则所有审查都进 judge_error 分支)。"""
+    from pr_review.quality import Judge
+
+    jr = Judge._parse('{"score": 88, "verdict": "pass", "reasons": []}')
+    assert jr.parse_failed is False
+    assert jr.raw == ""
+    assert jr.score == 88
+
+
+def test_p03_evaluate_retries_once_then_succeeds():
+    """P0-3: 首次解析失败 → 严格 JSON 指令重试一次, 成功则不算故障。"""
+    from pr_review.quality import Judge
+
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(content="这是解释文字, 没有 JSON", model="m", provider="p", usage={}),
+        ChatResponse(content='{"score": 77, "verdict": "pass", "reasons": []}', model="m", provider="p", usage={}),
+    ]
+    jr = Judge(llm=llm, config=QualityConfig(pass_score=70)).evaluate(
+        ReviewResult(added_lines={}), "diff"
+    )
+    assert jr.parse_failed is False
+    assert jr.score == 77
+    assert llm.chat.call_count == 2
+    # 重试请求里必须带上"只输出 JSON"的严格指令
+    retry_messages = llm.chat.call_args_list[1][0][0]
+    assert any("只输出一个 JSON" in m["content"] for m in retry_messages)
+
+
+def test_p03_evaluate_double_failure_is_flagged_once():
+    """P0-3: 两次都解析失败 → 标故障并停下(不无限重试)。"""
+    from pr_review.quality import Judge
+
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(content="nope", model="m", provider="p", usage={}),
+        ChatResponse(content="still nope", model="m", provider="p", usage={}),
+    ]
+    jr = Judge(llm=llm, config=QualityConfig(pass_score=70)).evaluate(
+        ReviewResult(added_lines={}), "diff"
+    )
+    assert jr.parse_failed is True
+    assert llm.chat.call_count == 2  # 只重试一次
+
+
+def test_p03_judge_failure_short_circuits_without_rewrite():
+    """P0-3: judge 故障 → verdict=judge_error, 不触发重写(重写照样解析不出, 只烧 token)。"""
+    responses = [
+        ChatResponse(
+            content='{"summary": "s", "issues": [{"file": "src/a.py", "line": 1, "severity": "warn", "title": "A", "detail": "", "suggestion": ""}]}',
+            model="m", provider="p", usage={},
+        )
+        for _ in range(4)
+    ]
+    runner, _, llm = _quality_runner(responses)
+
+    from pr_review.quality import JudgeResult
+
+    def _boom(result, diff_text):
+        return JudgeResult(score=0, verdict="rewrite", reasons=["judge 输出无法解析"],
+                           parse_failed=True, raw="我觉得…")
+
+    with patch("pr_review.quality.Judge.evaluate", side_effect=_boom):
+        result = runner.run()
+
+    assert result.quality_verdict == "judge_error"
+    assert result.quality_parse_failed is True
+    assert result.quality_score is None       # 不给 0 分(0 分会被读成"质量差")
+    assert result.quality_raw_output == "我觉得…"  # 原文从 judge 结果搬进 ReviewResult(留档)
+    assert result.rewrites == 0               # 没重写
+    assert llm.chat.call_count == 1           # 只审了一次
+    assert result.issues                    # 审查产出保留(issues 是产品, 不静默丢弃)
+
+
+def test_p03_comment_marks_gate_not_effective():
+    """P0-3: 评论里显式写明"质量门未生效"(工具故障), 不写成"质量未达标"(判负)。"""
+    runner, _, _ = _quality_runner([])
+    result = ReviewResult(model="m", review_no=2)
+    result.quality_parse_failed = True
+    result.quality_verdict = "judge_error"
+    result.issues = [_issue(file="a.py", line=1, severity=2)]
+    comment = runner.format_comment(result)
+    assert "质量评分不可用" in comment
+    assert "judge" in comment
+    assert "质量未达标" not in comment  # 不能写成"判负"(那是另一回事)
+
+
+def test_p03_comment_archives_judge_raw_output():
+    """P0-3: judge 原文进评论折叠块留档(只写日志的话, 日志过期就查不出来了)。"""
+    runner, _, _ = _quality_runner([])
+    result = ReviewResult(model="m", review_no=2)
+    result.quality_parse_failed = True
+    result.quality_raw_output = "我觉得这个 PR 整体不错, 但有 3 点建议…"
+    result.issues = [_issue(file="a.py", line=1, severity=2)]
+    comment = runner.format_comment(result)
+    assert "<details>" in comment and "judge 原始输出" in comment
+    assert "我觉得这个 PR 整体不错" in comment  # 原文可查
+
+
+def test_p03_no_raw_block_when_judge_healthy():
+    """P0-3 反向守卫: judge 正常时不得出现折叠留档块(否则正常评论被污染)。"""
+    runner, _, _ = _quality_runner([])
+    result = ReviewResult(model="m", review_no=2)
+    result.quality_score = 88.0
+    result.quality_verdict = "pass"
+    result.issues = [_issue(file="a.py", line=1, severity=2)]
+    comment = runner.format_comment(result)
+    assert "judge 原始输出" not in comment
+    assert "质量评分不可用" not in comment
+
+
+def test_p03_stats_footer_reports_unavailable_score():
+    """P0-3: 统计脚注显示"不可用", 而不是 0/100(0 分是错误信息)。"""
+    from pr_review.output import check_summary
+
+    runner, _, _ = _quality_runner([])
+    result = ReviewResult()
+    result.quality_parse_failed = True
+    summary = check_summary(result, runner.config)
+    assert "不可用" in summary
+    assert "0/100" not in summary
+
+
+def test_p03_judge_failure_does_not_change_issue_gate():
+    """P0-3: 评分与门禁解耦 —— judge 故障不改变 issue 门禁判定。
+
+    报告 P0-3 明确要求"不改变 issue 门禁": 否则一次 judge 抖动就能把 4 级问题的
+    failure 变成放行(或反过来), 门禁含义随工具状态漂移。
+    """
+    from pr_review.output import has_blocking_issues
+
+    runner, _, _ = _quality_runner([])
+    result = ReviewResult()
+    result.issues = [_issue(file="a.py", line=1, severity=4)]  # 达门禁级
+    assert has_blocking_issues(runner.config, result) is True
+    result.quality_parse_failed = True
+    result.quality_verdict = "judge_error"
+    assert has_blocking_issues(runner.config, result) is True  # 故障不改变结论

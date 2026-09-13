@@ -173,6 +173,12 @@ def main() -> None:
             logger.error("审查输出解析失败,跳过正常发布")
             return
 
+        # 判官故障(P0-3): 故障在质量评估层, 审查产出本身有效。
+        # 与 degraded(判负)不同: 照常发布审查(issues 是产品, 静默丢弃才是事故);
+        # 且"评分与门禁解耦"—— judge 坏没坏, 不改变 issue 门禁的判定结果,
+        # 故障只体现在评分留档与说明文字上(否则一次工具抖动就能改掉合并门禁)。
+        judge_failed = result.quality_verdict == "judge_error"
+
         # 质量门降级(P1b):不发低质量审查,发说明评论(附 issues 摘要) + check neutral(不拦合并)
         if result.quality_verdict == "degraded":
             pr = platform.get_pr_info()
@@ -186,6 +192,8 @@ def main() -> None:
                     summary=(
                         f"质量评分 {result.quality_score:.0f}/100, "
                         f"阈值 {review_cfg.quality_gate.pass_score}, 重写 {result.rewrites} 次仍不达标"
+                        if result.quality_score is not None
+                        else f"重写 {result.rewrites} 次后仍未取得有效评分"
                     ),
                 )
             except GitHubError as e:
@@ -207,13 +215,21 @@ def main() -> None:
         # check-run 合并门禁:达到 fail_on_severity 门槛 → failure(check 红)
         # 注意:权限不足(旧 workflow 无 checks: write)时仅告警,不中断已发布的评论
         blocked = has_blocking_issues(review_cfg, result)
+        check_title_txt = check_title(result, blocked, review_cfg)
+        check_summary_txt = check_summary(result, review_cfg)
+        if judge_failed:
+            check_title_txt += " · judge 故障"
+            check_summary_txt += (
+                "\n- 注: judge 连续 2 次输出无法解析(工具故障), 本轮质量评分不可用; "
+                "按「评分与门禁解耦」, issue 门禁判定不受影响"
+            )
         try:
             platform.create_check_run(
                 "AI Review",
                 head_sha=pr.head_sha,
                 conclusion="failure" if blocked else "success",
-                title=check_title(result, blocked, review_cfg),
-                summary=check_summary(result, review_cfg),
+                title=check_title_txt,
+                summary=check_summary_txt,
             )
         except GitHubError as e:
             logger.warning("创建 check-run 失败(可忽略,评论已发布): %s", e)
@@ -230,6 +246,9 @@ def main() -> None:
             result.total_cost,
             blocked,
         )
+
+        if judge_failed:
+            logger.warning("judge 故障: 质量评分不可用, 已按解耦规则照常执行 issue 门禁")
 
         _flush_otel()  # 确保 OTel span 在进程退出前导出(避免异常退出丢 trace)
 

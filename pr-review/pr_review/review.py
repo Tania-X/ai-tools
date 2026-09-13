@@ -102,6 +102,10 @@ class ReviewIssue:
     suggestion: str
     category: str = "other"  # bug / security / convention / design_intent / resource / type_consistency / other
     evidence: str = ""       # 判断依据(引用代码/契约位置)
+    # 可验证路径(P0-1, 2026-09-13): 门禁级(≥4)问题必须说明"怎么证明它",
+    # 三选一——复现输入/命令、能反驳它的现有测试名、或 "none: 属推演";
+    # 空白表示没给, 由 quality.per_issue_verify 兜底降级。
+    verification: str = ""
     needs_review: bool = False  # 需人工确认(设计意图类不确定判断,不计入门禁)
     # 两轴事实原始值(2026-08-24 保留, 供质量门确定性降级用):
     #   trigger: real / hypothetical / style; impact: fatal / functional / minor / none
@@ -137,6 +141,7 @@ class ReviewIssue:
             suggestion=str(d.get("suggestion", "")),
             category=str(d.get("category", "other")),
             evidence=str(d.get("evidence", "")),
+            verification=str(d.get("verification", "")),
             needs_review=bool(d.get("needs_review", False)),
             trigger=trigger,
             impact=impact,
@@ -173,6 +178,11 @@ class ReviewResult:
     quality_score: float | None = None
     quality_verdict: str | None = None  # pass / rewrite / degraded
     quality_reasons: list[str] = field(default_factory=list)
+    # P0-3: judge 输出无法解析(工具故障) → 评分不可用。与"判负"(低分)严格区分:
+    # 前者是"不知道", 不能写成 0 分, 也不能触发重写(重写也会有同样的故障)。
+    quality_parse_failed: bool = False
+    # P0-3: judge 无法解析的原始输出(截断留档, 评论里折叠展示; 便于事后判断故障形态)
+    quality_raw_output: str = ""
     rewrites: int = 0
     # 审查输出 JSON 解析失败的批次(2026-08-14 事故后引入: 失败必须显式, 不能静默变空 issues)
     parse_errors: list[str] = field(default_factory=list)
@@ -437,6 +447,20 @@ class ReviewRunner:
 
         for attempt in range(max_rewrites + 1):
             jr = judge.evaluate(result, diff_text)
+            if jr.parse_failed:
+                # P0-3(判官故障留档): judge 坏了 ≠ 审查判负。给 0 分会误导成"质量差",
+                # 重写只是烧 token(故障是工具侧的, 换一轮照样解析不出), 故直接短路。
+                result.quality_parse_failed = True
+                result.quality_verdict = "judge_error"
+                result.quality_reasons = jr.reasons
+                result.quality_score = None
+                result.quality_raw_output = jr.raw or ""
+                logger.error(
+                    "质量门不可用: judge 连续 2 次输出无法解析, 本轮不做质量评估"
+                    "(按'judge 故障'计, 非'审查质量差'); 原文留档前 500 字: %s",
+                    (jr.raw or "")[:500],
+                )
+                break
             result.quality_score = jr.score
             result.quality_reasons = jr.reasons
             if jr.verdict == "pass":
@@ -785,6 +809,22 @@ class ReviewRunner:
             header,
             "",
         ]
+        # 判官故障(P0-3): 显式标注"评分不可用", 且说明门禁未受其影响(评分与门禁解耦)
+        if result.quality_parse_failed:
+            lines.append(
+                "> ⚠️ **质量评分不可用**: judge 连续 2 次输出无法解析(工具故障, 非审查判负)。"
+                "本轮未做质量评估, 门禁判定仍按下列问题级别执行(评分与门禁解耦)。"
+            )
+            if result.quality_raw_output:
+                lines.append("")
+                lines.append("<details><summary>judge 原始输出(留档, 供排查)</summary>")
+                lines.append("")
+                lines.append("```text")
+                lines.append(result.quality_raw_output[:1500])
+                lines.append("```")
+                lines.append("")
+                lines.append("</details>")
+            lines.append("")
         # 质量门评分透明化: judge 打过分就显示(pass 也显示, 不只降级)
         if result.quality_score is not None:
             verdict_txt = {"pass": "通过", "rewrite": "重写后通过", "degraded": "降级"}.get(

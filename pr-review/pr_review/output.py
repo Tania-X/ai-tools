@@ -93,6 +93,8 @@ def check_summary(result: ReviewResult, cfg: ReviewConfig) -> str:
         lines.append("- 说明: 「需人工确认」的问题按仓库约定不计入门禁, 不会阻塞合并")
     if result.quality_score is not None:
         lines.append(f"- 质量评分: {result.quality_score:.0f}/100")
+    elif getattr(result, "quality_parse_failed", False):
+        lines.append("- 质量评分: 不可用(judge 输出无法解析, 工具故障; 未做质量评估)")
     if result.skipped_files:
         lines.append(f"- 跳过文件: {result.skipped_files}")
     return "\n".join(lines)
