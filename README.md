@@ -125,6 +125,7 @@ ai-tools-cli pricing refresh
 - [审查引擎设计](docs/ai-review-architecture.md) · [质量门设计](docs/pr-review-quality-gate.md) · [评测方案](docs/golden-testing.md)
 - [双引擎对比报告](docs/l3-dual-engine-eval.md) · [OTel 可观测性](docs/otel-tracing.md)
 - [taste 沉淀(审查品味工程化)](docs/taste-engineering.md)
+- [误报现场报告(真实 PR 15 轮实测 + 改进建议)](docs/pr-review-false-positive-field-report.md)
 
 ## 为什么这么做(面试叙事)
 
