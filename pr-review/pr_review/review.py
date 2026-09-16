@@ -189,6 +189,9 @@ class ReviewResult:
     quality_parse_failed: bool = False
     # P0-3: judge 无法解析的原始输出(截断留档, 评论里折叠展示; 便于事后判断故障形态)
     quality_raw_output: str = ""
+    # 判官故障时从原文抢救出的 reasons(2026-09-16): judge 与 reviewer 的分歧要点,
+    # 显式标注"原文提取", 不与结构化评分混淆
+    quality_salvaged_reasons: list[str] = field(default_factory=list)
     rewrites: int = 0
     # 审查输出 JSON 解析失败的批次(2026-08-14 事故后引入: 失败必须显式, 不能静默变空 issues)
     parse_errors: list[str] = field(default_factory=list)
@@ -494,6 +497,7 @@ class ReviewRunner:
                 result.quality_reasons = jr.reasons
                 result.quality_score = None
                 result.quality_raw_output = jr.raw or ""
+                result.quality_salvaged_reasons = list(jr.salvaged_reasons)
                 logger.error(
                     "质量门不可用: judge 连续 2 次输出无法解析, 本轮不做质量评估"
                     "(按'judge 故障'计, 非'审查质量差'); 原文留档前 500 字: %s",
@@ -906,6 +910,13 @@ class ReviewRunner:
                 "> ⚠️ **质量评分不可用**: judge 连续 2 次输出无法解析(工具故障, 非审查判负)。"
                 "本轮未做质量评估, 门禁判定仍按下列问题级别执行(评分与门禁解耦)。"
             )
+            if result.quality_salvaged_reasons:
+                # 故障不等于"judge 没意见": 把它的分歧要点摆出来(标注来源), 否则等于丢信号
+                lines.append("")
+                lines.append(
+                    "**judge 反馈(未能结构化解析, 以下为原文提取, 仅供参考)**:"
+                )
+                lines.extend(f"- {r}" for r in result.quality_salvaged_reasons)
             if result.quality_raw_output:
                 lines.append("")
                 lines.append("<details><summary>judge 原始输出(留档, 供排查)</summary>")

@@ -1145,3 +1145,131 @@ def test_no_sentinel_keeps_judge_behaviour_unchanged():
     assert result.rewrites == 1 and result.quality_verdict == "pass"
     assert result.quality_score == 88.0
     assert llm.chat.call_count == 2
+
+# ------------------------------------------------ 竞态规则 + judge 分歧抢救(2026-09-16)
+def test_prompt_requires_deterministic_interleaving_for_races():
+    """prompt 必须要求: 竞态结论要么给具体交错/复现步骤, 要么判 hypothetical。"""
+    from pr_review.prompt import SYSTEM_PROMPT
+
+    flat = "".join(SYSTEM_PROMPT.split())
+    assert "并发/竞态类断言尤其容易高判" in flat
+    assert "具体交错" in flat
+    assert "trigger=hypothetical" in flat
+    # 反向: 不能把"锁持有过久/串行化"这类确定性问题一并降级(否则会漏真问题)
+    assert "锁被持有时间过长" in flat and "不受此限" in flat
+
+
+def test_judge_rubric_flags_speculative_races():
+    """judge rubric 要把"无确定性交错的竞态判 ≥4"算作严重度高判。"""
+    from pr_review.quality import JUDGE_SYSTEM_PROMPT
+
+    flat = "".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "竞态类断言" in flat
+    assert "缺确定性交错" in flat
+
+
+def test_salvage_reasons_extracts_from_truncated_output():
+    """judge 故障时抠出它写下的 reasons —— 真实形态是**输出被 max_tokens 截断**。
+
+    截断的 JSON 没有收尾 `]`, 所以提取不能依赖它; 半句那个条目自然抓不到, 前几条要保住。
+    """
+    from pr_review.quality import _salvage_reasons
+
+    raw = (
+        "说明性文字…\n"
+        '{"score": 58, "verdict": "rewrite", "reasons": ['
+        '"issue #1 严重度高判: 假设性竞态却判 severity 4", '
+        '"issue #2 自认属推演, 属噪音", '
+        '"issue #3 可验证路径不足", '
+        '"第四条被截断了, 没有收尾的引号'
+    )
+    reasons = _salvage_reasons(raw)
+    assert len(reasons) == 3, f"上限 3 条, 实际 {len(reasons)}"
+    assert "严重度高判" in reasons[0]
+    assert "属推演" in reasons[1]
+    assert reasons == _salvage_reasons(raw), "结果要稳定(去重后保序)"
+
+
+def test_salvage_reasons_also_handles_complete_json():
+    """完整 JSON 也要能抠(它可能因为别的原因解析失败, 例如字段类型不对)。"""
+    from pr_review.quality import _salvage_reasons
+
+    raw = '{"score": 55, "verdict": "rewrite", "reasons": ["竞态无确定性交错"]}'
+    assert _salvage_reasons(raw) == ["竞态无确定性交错"]
+
+
+def test_salvage_reasons_is_empty_when_there_is_nothing_to_salvage():
+    """反向守卫: 没有 reasons 可抠时返回空(不能让"抢救"变成编造)。"""
+    from pr_review.quality import _salvage_reasons
+
+    assert _salvage_reasons("完全不是 JSON 的一段话") == []
+    assert _salvage_reasons("") == []
+    assert _salvage_reasons('{"score": 50, "verdict": "rewrite"}') == []
+
+
+def test_judge_parse_failure_keeps_salvaged_reasons():
+    """Judge._parse 失败时: parse_failed=True + salvaged_reasons 有内容 + reasons 仍是故障文案。"""
+    from pr_review.quality import Judge
+
+    jr = Judge._parse(
+        # 截断形态(线上真实故障): JSON 没写完 → 严格解析失败
+        '说明文字\n{"score": 55, "verdict": "rewrite", "reasons": ["issue 1 证据是假设性竞态"'
+    )
+    assert jr.parse_failed is True
+    assert jr.raw
+    assert jr.reasons == ["judge 输出无法解析(judge 故障, 非审查结论)"]
+    assert jr.salvaged_reasons and "假设性竞态" in jr.salvaged_reasons[0]
+
+
+def test_judge_fault_carries_salvaged_reasons_through_the_run():
+    """走真实路径: judge 故障时, 抢救出的理由必须落到最终 result 上。
+
+    (上面那条只测渲染, 手工塞字段; 变异测试曾指出"生产搬运那行删掉也全绿"——
+     这条专门覆盖搬运本身。)
+    """
+    from pr_review.quality import JudgeResult
+
+    runner, _, _ = _quality_runner([
+        ChatResponse(
+            content='{"summary": "s", "issues": [{"file": "src/a.py", "line": 1,'
+                    ' "severity": "warn", "title": "A", "detail": "", "suggestion": ""}]}',
+            model="m", provider="p", usage={},
+        )
+    ])
+
+    def _faulty(result, diff_text):
+        return JudgeResult(
+            score=0, verdict="rewrite",
+            reasons=["judge 输出无法解析(judge 故障, 非审查结论)"],
+            parse_failed=True, raw="[first]\n{\"score\": 58, \"reasons\": [\"假设性竞态\"",
+            salvaged_reasons=["issue #1 严重度高判: 假设性竞态却判 severity 4"],
+        )
+
+    with patch("pr_review.quality.Judge.evaluate", side_effect=_faulty):
+        result = runner.run()
+
+    assert result.quality_parse_failed is True
+    assert result.quality_verdict == "judge_error"
+    assert result.quality_salvaged_reasons == ["issue #1 严重度高判: 假设性竞态却判 severity 4"]
+    assert "假设性竞态却判 severity 4" in runner.format_comment(result)
+
+
+def test_judge_fault_comment_shows_salvaged_disagreement():
+    """评论里要展示 judge 的分歧要点(标注为原文提取), 而不是只留一段原始输出。"""
+    runner, _, _ = _quality_runner([])
+    result = ReviewResult(model="m", review_no=2)
+    result.quality_parse_failed = True
+    result.quality_verdict = "judge_error"
+    result.quality_raw_output = "…原文…"
+    result.quality_salvaged_reasons = ["issue #1 严重度高判: 假设性竞态却判 severity 4"]
+    result.issues = [_issue(file="a.py", line=1, severity=2)]
+
+    comment = runner.format_comment(result)
+    assert "原文提取" in comment
+    assert "假设性竞态却判 severity 4" in comment
+    # 反向守卫: 正常轮次不得出现这段
+    ok = ReviewResult(model="m", review_no=3)
+    ok.quality_score = 88.0
+    ok.quality_verdict = "pass"
+    ok.issues = [_issue(file="a.py", line=1, severity=2)]
+    assert "原文提取" not in runner.format_comment(ok)

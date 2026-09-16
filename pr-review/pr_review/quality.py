@@ -19,6 +19,37 @@ from .prompt import parse_review_json
 
 logger = logging.getLogger(__name__)
 
+#: 从"无法解析的 judge 输出"里找 reasons 数组。
+#: **不能要求收尾的 `]`**: 线上两轮故障的真实形态是 judge 输出被 max_tokens 截断,
+#: 也就是 JSON 根本没写完(`{"score": 58, ... "reasons": ["严重度高判: ...` 断在半句)。
+#: 所以先定位 `"reasons": [` 的开头, 再往后取(遇到 `]` 就截到那里)。
+_REASONS_HEAD = re.compile(r'"reasons"\s*:\s*\[', re.S)
+_REASONS_ITEM = re.compile(r'"((?:[^"\\]|\\.){5,})"')
+MAX_SALVAGED_REASONS = 3
+
+
+def _salvage_reasons(content: str, limit: int = MAX_SALVAGED_REASONS) -> list[str]:
+    """Best-effort: pull the judge's reasons out of unparseable output.
+
+    Only used on the failure path, and every caller labels the result as
+    "extracted from the raw output" — the point is to keep the judge's
+    disagreement visible, never to pass it off as a structured verdict.
+    """
+    match = _REASONS_HEAD.search(content or "")
+    if not match:
+        return []
+    tail = content[match.end():]
+    closing = tail.find("]")
+    body = tail[:closing] if closing != -1 else tail   # 截断时没有 ]
+    reasons: list[str] = []
+    for raw_item in _REASONS_ITEM.findall(body):
+        text = raw_item.replace('\\"', '"').replace("\\\\", "\\").strip()
+        if text and text not in reasons:
+            reasons.append(text)
+        if len(reasons) >= limit:
+            break
+    return reasons
+
 # P0-3: judge 输出无法解析时的一次严格重试指令
 RETRY_JSON_INSTRUCTION = (
     "上一次输出无法解析为 JSON。请只输出一个 JSON 对象, 不要任何解释文字、"
@@ -33,6 +64,8 @@ JUDGE_SYSTEM_PROMPT = """你是代码审查质量评估员,对 AI 审查产出�
 - 噪音: 是否过度挑剔无关紧要的问题
 - 严重度与证据匹配(2026-08-19 P1): issue 的 trigger/impact 判断是否与 evidence 一致。
   证据是假设性故障("若 X 失败则…")却判 high/real → 严重度高判(最贵的误报, 会误拦合并), 必须扣分。
+- 竞态类断言(2026-09-16): "两个请求/两个线程可能同时…"、"若关停发生在构建窗口内…"这类
+  **没有具体交错或复现路径**的并发结论若被判 ≥4, 同样属严重度高判, 必须扣分并写明"缺确定性交错"。
 - 可验证性(P0-1, 2026-08-13): 会拦合并的 issue(≥4)是否给了可验证路径(verification):
   复现输入/命令、能反驳它的现有测试, 或明确标注"属推演"。verification 为空且 evidence 也是空话,
   或自认属推演却判 ≥4 → 扣分(不可证伪的结论会误拦合并)。
@@ -58,6 +91,11 @@ class JudgeResult:
     # 与"judge 正常给出低分"必须区分: 前者是工具故障(不可知), 后者是真实判负。
     parse_failed: bool = False
     raw: str = ""
+    # 判官故障时的"抢救信息"(2026-09-16): judge 解析失败 ≠ 它没说话。它往往在散文里
+    # 写了一个完整 JSON(或至少 reasons 列表), 而那些话正是它与 reviewer 的分歧所在
+    # (线上两轮故障里 judge 都在说"reviewer 严重度高判")。丢掉它们等于丢掉最有价值的信号,
+    # 所以从原文里宽松提取, 并**显式标注为原文提取**, 不与结构化结果混淆。
+    salvaged_reasons: list[str] = field(default_factory=list)
 
 
 class Judge:
@@ -139,6 +177,7 @@ class Judge:
                 score=0, verdict="rewrite",
                 reasons=["judge 输出无法解析(judge 故障, 非审查结论)"],
                 parse_failed=True, raw=(content or "")[:500],
+                salvaged_reasons=_salvage_reasons(content),
             )
 
 
