@@ -191,3 +191,36 @@ def test_chat_sends_provider_extra_body(monkeypatch):
     stub_post(monkeypatch, handler)
     client.chat([{"role": "user", "content": "hi"}])
     assert captured["payload"]["thinking"] == {"type": "disabled"}
+
+def test_chat_captures_finish_reason(monkeypatch):
+    """finish_reason 必须留: 它是"被 max_tokens 截断"与"格式跑偏"的唯一区分依据。
+
+    2026-09-18 排查 judge 连续解析失败时, 该字段被客户端丢掉, 归档原文又被截到 500 字,
+    结果是"输出到底写完了没有"无从判断 —— 只能靠猜。
+    """
+    client = make_client()
+    truncated = fake_response(
+        body={
+            "id": "chatcmpl-trunc",
+            "model": "deepseek-chat",
+            "choices": [
+                {"message": {"role": "assistant", "content": '{"score": 62, "rea'},
+                 "finish_reason": "length"}
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 400},
+        }
+    )
+    stub_post(monkeypatch, lambda self, url, json, headers, timeout: truncated)
+
+    resp = client.chat([{"role": "user", "content": "hi"}], max_tokens=400)
+
+    assert resp.finish_reason == "length"
+    assert resp.completion_tokens == 400
+
+
+def test_chat_finish_reason_defaults_to_empty_when_absent(monkeypatch):
+    """老端点/夹具不带该字段时不能炸(空串表示未知, 不假装是正常收尾)。"""
+    client = make_client()
+    stub_post(monkeypatch, lambda self, url, json, headers, timeout: fake_response())
+
+    assert client.chat([{"role": "user", "content": "hi"}]).finish_reason == ""

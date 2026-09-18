@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 _REASONS_HEAD = re.compile(r'"reasons"\s*:\s*\[', re.S)
 _REASONS_ITEM = re.compile(r'"((?:[^"\\]|\\.){5,})"')
 MAX_SALVAGED_REASONS = 3
+#: 故障原文留档上限(字符)。原为 500, 结果是**留档本身把答案截掉了**: 2026-09-18 排查线上
+#: judge 连续解析失败时, 归档的两次输出都恰好 500 字, 既看不出模型有没有写完, 也分不清
+#: "被 max_tokens 截断"和"输出格式跑偏"——留档的意义就是能事后复盘, 截在故障点上等于没留。
+MAX_RAW_ARCHIVE_CHARS = 2000
+#: 截断型故障的重试预算倍数。重试若沿用同一个 max_tokens, 对"输出被截断"必然是空转:
+#: 第一次装不下, 第二次同样装不下。这类故障只能靠**加预算 + 要更短的输出**来救。
+TRUNCATION_RETRY_FACTOR = 2
+TRUNCATION_RETRY_FLOOR = 800
 
 
 def _salvage_reasons(content: str, limit: int = MAX_SALVAGED_REASONS) -> list[str]:
@@ -56,6 +64,14 @@ RETRY_JSON_INSTRUCTION = (
     'Markdown 围栏或前后缀, 形如 {"score": 0-100, "verdict": "pass|rewrite", "reasons": [...]}。'
 )
 
+#: 截断型故障(finish_reason=length)的重试指令: 光要求"纯 JSON"没用 —— 它本来就是纯 JSON,
+#: 只是没写完。要同时**放宽预算**(见 TRUNCATION_RETRY_FACTOR)并**压缩输出**。
+RETRY_TRUNCATED_INSTRUCTION = (
+    "上一次输出被长度上限截断(JSON 未收尾)。请只输出一个 JSON 对象, 不要解释文字或围栏, "
+    '最多 2 条 reasons, 每条不超过 60 字, 形如 '
+    '{"score": 0-100, "verdict": "pass|rewrite", "reasons": ["扣分点1", "扣分点2"]}。'
+)
+
 JUDGE_SYSTEM_PROMPT = """你是代码审查质量评估员,对 AI 审查产出打分。
 评分维度(rubric):
 - 准确性: issue 是否真实对应代码问题(幻觉/误报)— 对照 diff 与 evidence 判断
@@ -79,6 +95,10 @@ JUDGE_SYSTEM_PROMPT = """你是代码审查质量评估员,对 AI 审查产出�
 
 输出严格 JSON(不要多余文本):
 {{"score": 0-100, "verdict": "pass" 或 "rewrite", "reasons": ["扣分点1", "扣分点2"]}}
+
+输出长度约束(**必须遵守, 否则 JSON 会被截断导致整轮评分作废**):
+- reasons 最多 3 条, 每条不超过 80 字; 只写最关键的扣分点, 不要展开论证
+- 不要复述 rubric、不要贴代码、不要在 JSON 之外写任何文字
 """
 
 
@@ -96,6 +116,17 @@ class JudgeResult:
     # (线上两轮故障里 judge 都在说"reviewer 严重度高判")。丢掉它们等于丢掉最有价值的信号,
     # 所以从原文里宽松提取, 并**显式标注为原文提取**, 不与结构化结果混淆。
     salvaged_reasons: list[str] = field(default_factory=list)
+    # 故障分类(2026-09-18): "解析不出"有两种完全不同的成因, 修法也不同——
+    #   finish_reason="length" → 输出被 max_tokens 截断(要加预算)
+    #   其余(通常 "stop")      → 输出写完了但格式跑偏(要加约束)
+    # 不分清就只能靠猜: 此前归档原文被截到 500 字, 连"到底写完没有"都看不出来。
+    finish_reason: str = ""
+    completion_tokens: int = 0
+
+    @property
+    def truncated(self) -> bool:
+        """输出是否被长度上限截断(而非格式跑偏)。"""
+        return self.finish_reason == "length"
 
 
 class Judge:
@@ -116,37 +147,65 @@ class Judge:
             getattr(result, "verified_dimensions", None),
         )
         messages = build_judge_messages(result, diff_text, signals, self.config)
-        kwargs: dict[str, Any] = {"max_tokens": 400}
+        # 预算可配(judge_max_tokens): rubric 有 6 个维度且要求"逐条说明扣分点",
+        # 400 token 连 3 条中文理由都装不下 —— 线上连续两轮截断的根因就在这里。
+        kwargs: dict[str, Any] = {"max_tokens": self.config.judge_max_tokens}
         if self.config.judge_model:
             kwargs["model"] = self.config.judge_model
         # 模型路由: judge 可独立 provider(如便宜模型), 审查主流程用默认 provider
         if self.config.judge_provider:
             kwargs["provider"] = self.config.judge_provider
         resp = self.llm.chat(messages, **kwargs)
-        parsed = self._parse(resp.content)
+        parsed = self._parse(
+            resp.content,
+            finish_reason=resp.finish_reason,
+            completion_tokens=resp.completion_tokens,
+        )
         if not parsed.parse_failed:
             return parsed
-        # P0-3: 解析失败先重试一次(明确要求纯 JSON 输出, 不带解释/围栏)。
-        # 线上故障(x2 次/15 轮)多为"输出前后带说明文字"导致, 一次严格重试即可救回。
+        # P0-3: 解析失败先重试一次。历史故障多为"输出前后带说明文字"→ 严格 JSON 指令可救回;
+        # 2026-09-18 起发现更常见的是**被输出预算截断**, 那种情况照原样重试必然再失败,
+        # 故按 finish_reason 分叉(见下)。
         logger.warning(
-            "judge 输出无法解析, 重试一次(原文前 200 字): %s",
+            "judge 输出无法解析: finish_reason=%s completion_tokens=%d 长度=%d 字, 重试一次(原文前 200 字): %s",
+            resp.finish_reason or "?",
+            resp.completion_tokens,
+            len(resp.content or ""),
             (resp.content or "")[:200],
         )
         # R2-2(评审第 2 轮): 不能直接 append 第二条 user 消息——部分 provider(Anthropic 格式
         # 端点)要求 user/assistant 交替, 连续两条 user 会被 400 拒掉; 故并入最后一条 user 消息。
+        # 截断型故障必须换预算: 沿用同一个 max_tokens 重试等于把同样的失败再跑一遍。
+        retry_kwargs = dict(kwargs)
+        instruction = RETRY_JSON_INSTRUCTION
+        if parsed.truncated:
+            retry_kwargs["max_tokens"] = max(
+                int(kwargs["max_tokens"]) * TRUNCATION_RETRY_FACTOR,
+                int(kwargs["max_tokens"]) + TRUNCATION_RETRY_FLOOR,
+            )
+            instruction = RETRY_TRUNCATED_INSTRUCTION
+            logger.warning(
+                "judge 输出被截断(max_tokens=%s 用尽), 重试预算提升到 %s 并要求更短的输出",
+                kwargs["max_tokens"],
+                retry_kwargs["max_tokens"],
+            )
         retry_messages = messages[:-1] + [
             {
                 "role": "user",
                 "content": (messages[-1]["content"] if messages else "")
-                + "\n\n" + RETRY_JSON_INSTRUCTION,
+                + "\n\n" + instruction,
             },
         ]
         try:
-            retry = self.llm.chat(retry_messages, **kwargs)
+            retry = self.llm.chat(retry_messages, **retry_kwargs)
         except Exception as e:  # noqa: BLE001 重试失败按"判官故障"处理, 不冒泡打断整轮审查
             logger.error("judge 重试调用失败, 按判官故障处理: %s", e)
             return parsed
-        parsed_retry = self._parse(retry.content)
+        parsed_retry = self._parse(
+            retry.content,
+            finish_reason=retry.finish_reason,
+            completion_tokens=retry.completion_tokens,
+        )
         if not parsed_retry.parse_failed:
             logger.info("judge 严格重试成功")
             return parsed_retry
@@ -156,14 +215,30 @@ class Judge:
             parsed_retry.raw = (
                 f"[first]\n{parsed.raw}\n[retry]\n{parsed_retry.raw}"
             )
+        # 两次的抢救理由都留(首次那份是未被干预的原始形态), 去重保序后合并。
+        merged: list[str] = []
+        for reason in list(parsed.salvaged_reasons) + list(parsed_retry.salvaged_reasons):
+            if reason not in merged:
+                merged.append(reason)
+        parsed_retry.salvaged_reasons = merged[:MAX_SALVAGED_REASONS]
         logger.error(
-            "judge 连续 2 次输出无法解析, 本轮质量评分不可用(两次原文留档): %s",
-            parsed_retry.raw[:500],
+            "judge 连续 2 次输出无法解析, 本轮质量评分不可用"
+            "(first: finish_reason=%s completion_tokens=%d | retry: finish_reason=%s completion_tokens=%d): %s",
+            parsed.finish_reason or "?",
+            parsed.completion_tokens,
+            parsed_retry.finish_reason or "?",
+            parsed_retry.completion_tokens,
+            parsed_retry.raw[:MAX_RAW_ARCHIVE_CHARS],
         )
         return parsed_retry
 
     @staticmethod
-    def _parse(content: str) -> JudgeResult:
+    def _parse(
+        content: str,
+        *,
+        finish_reason: str = "",
+        completion_tokens: int = 0,
+    ) -> JudgeResult:
         try:
             data = parse_review_json(content)
             score = int(data.get("score", 0) or 0)
@@ -171,13 +246,17 @@ class Judge:
             if verdict not in ("pass", "rewrite"):
                 verdict = "rewrite"
             reasons = [str(r) for r in (data.get("reasons") or [])]
-            return JudgeResult(score=score, verdict=verdict, reasons=reasons)
+            return JudgeResult(
+                score=score, verdict=verdict, reasons=reasons,
+                finish_reason=finish_reason, completion_tokens=completion_tokens,
+            )
         except ValueError:
             return JudgeResult(
                 score=0, verdict="rewrite",
                 reasons=["judge 输出无法解析(judge 故障, 非审查结论)"],
-                parse_failed=True, raw=(content or "")[:500],
+                parse_failed=True, raw=(content or "")[:MAX_RAW_ARCHIVE_CHARS],
                 salvaged_reasons=_salvage_reasons(content),
+                finish_reason=finish_reason, completion_tokens=completion_tokens,
             )
 
 

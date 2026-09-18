@@ -32,6 +32,11 @@ class ChatResponse:
     usage: dict = field(default_factory=dict)  # prompt_tokens / completion_tokens ...
     cost: float = 0.0  # 元(未配置单价时为 0)
     tool_calls: list | None = None  # [{id, name, arguments}] — 模型请求调用工具时非空
+    #: 模型为什么停下: "stop"=正常收尾, "length"=**被 max_tokens 截断**, "tool_calls"=请求调工具。
+    #: 必须留: "输出被截断"与"模型写了散文/格式跑偏"都表现为"JSON 解析失败", 但修法完全不同
+    #: (前者要加预算, 后者要加约束)。丢掉它, 事后只能靠猜 —— 2026-09-18 judge 连续两轮
+    #: 解析失败时就卡在这里: 归档的原文被我们自己截断到 500 字, 无法判断输出到底有没有写完。
+    finish_reason: str = ""
 
     @property
     def prompt_tokens(self) -> int:
@@ -97,6 +102,7 @@ class LLMClient:
 
             msg = data["choices"][0]["message"]
             content = msg.get("content", "") or ""
+            finish_reason = str(data["choices"][0].get("finish_reason") or "")
             tool_calls = None
             if msg.get("tool_calls"):
                 tool_calls = [
@@ -116,6 +122,7 @@ class LLMClient:
             span.set_attribute("llm.cost.fallback", cost_source == "builtin" and bool(getattr(pc, "dynamic_pricing", False)))
             span.set_attribute("llm.tool_calls", len(tool_calls) if tool_calls else 0)
             span.set_attribute("llm.content_len", len(content))
+            span.set_attribute("llm.finish_reason", finish_reason)
         self.prompt_tokens += usage.get("prompt_tokens", 0)
         self.completion_tokens += usage.get("completion_tokens", 0)
         self.total_cost += cost
@@ -127,6 +134,7 @@ class LLMClient:
             usage=usage,
             cost=cost,
             tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
 
     # ------------------------------------------------------------ 重试 + 多 key 轮询

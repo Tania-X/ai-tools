@@ -64,6 +64,7 @@ quality_gate:
   pass_score: 70         # 低于则触发重写
   max_rewrites: 3        # 重写硬上限, 耗尽后降级
   max_judge_input_chars: 8000  # judge 输入预算(大 PR 截断)
+  judge_max_tokens: 1200 # judge 输出预算: 太小会让 JSON 在理由中间被截断 → 评分整轮作废
   # linter 交叉验证层: 首版预留, 未实现(需工作流安装对应 linter)
   lint_enabled: false
   lint_only: [py, go, js]

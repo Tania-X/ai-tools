@@ -20,6 +20,7 @@ from .config import ReviewConfig
 from .diff import DiffHunk, FileDiff, parse_diff
 from .review_platform import ReviewPlatform
 from .prompt import build_messages, parse_review_json
+from .quality import MAX_RAW_ARCHIVE_CHARS
 from .models import PRFile, PRInfo
 from .reply import RESOLUTION_MARK_RE
 from .repo_tools import TOOL_SCHEMAS, RepoTools
@@ -192,6 +193,9 @@ class ReviewResult:
     # 判官故障时从原文抢救出的 reasons(2026-09-16): judge 与 reviewer 的分歧要点,
     # 显式标注"原文提取", 不与结构化评分混淆
     quality_salvaged_reasons: list[str] = field(default_factory=list)
+    # 判官故障的成因(2026-09-18): "length" = 输出被 max_tokens 截断(预算问题, 可自愈);
+    # 其余 = 写完了但格式跑偏(约束问题)。不区分的话, 排查只能猜。
+    quality_finish_reason: str = ""
     rewrites: int = 0
     # 审查输出 JSON 解析失败的批次(2026-08-14 事故后引入: 失败必须显式, 不能静默变空 issues)
     parse_errors: list[str] = field(default_factory=list)
@@ -498,10 +502,12 @@ class ReviewRunner:
                 result.quality_score = None
                 result.quality_raw_output = jr.raw or ""
                 result.quality_salvaged_reasons = list(jr.salvaged_reasons)
+                result.quality_finish_reason = jr.finish_reason
                 logger.error(
                     "质量门不可用: judge 连续 2 次输出无法解析, 本轮不做质量评估"
-                    "(按'judge 故障'计, 非'审查质量差'); 原文留档前 500 字: %s",
-                    (jr.raw or "")[:500],
+                    "(按'judge 故障'计, 非'审查质量差'); finish_reason=%s; 原文留档: %s",
+                    jr.finish_reason or "?",
+                    (jr.raw or "")[:MAX_RAW_ARCHIVE_CHARS],
                 )
                 break
             result.quality_score = jr.score
@@ -910,6 +916,13 @@ class ReviewRunner:
                 "> ⚠️ **质量评分不可用**: judge 连续 2 次输出无法解析(工具故障, 非审查判负)。"
                 "本轮未做质量评估, 门禁判定仍按下列问题级别执行(评分与门禁解耦)。"
             )
+            # 故障成因要写出来: "被 max_tokens 截断"是可自愈的预算问题(调 judge_max_tokens),
+            # 与"模型格式跑偏"是两回事。不说清, 读的人只能把它当玄学。
+            if result.quality_finish_reason == "length":
+                lines.append(
+                    "> 成因: judge 输出被 `max_tokens` 截断(JSON 未收尾)。"
+                    "可调 `.ai-review.yaml` 的 `quality_gate.judge_max_tokens` 提高预算。"
+                )
             if result.quality_salvaged_reasons:
                 # 故障不等于"judge 没意见": 把它的分歧要点摆出来(标注来源), 否则等于丢信号
                 lines.append("")
@@ -922,7 +935,7 @@ class ReviewRunner:
                 lines.append("<details><summary>judge 原始输出(留档, 供排查)</summary>")
                 lines.append("")
                 lines.append("```text")
-                lines.append(result.quality_raw_output[:1500])
+                lines.append(result.quality_raw_output[:MAX_RAW_ARCHIVE_CHARS])
                 lines.append("```")
                 lines.append("")
                 lines.append("</details>")

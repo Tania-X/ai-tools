@@ -1273,3 +1273,187 @@ def test_judge_fault_comment_shows_salvaged_disagreement():
     ok.quality_verdict = "pass"
     ok.issues = [_issue(file="a.py", line=1, severity=2)]
     assert "原文提取" not in runner.format_comment(ok)
+
+
+# ------------------------------------------- judge 输出预算(2026-09-18 截断事故)
+# 现场: judge 硬编码 max_tokens=400, 而 rubric 有 6 个维度且要求"逐条说明扣分点"。
+# 中文一条理由约 200 字, 3 条就超预算 → JSON 在第三条理由中间被截断 → 缺收尾 →
+# 严格解析失败 → 连重试也用同一个 400(装不下就是装不下) → 连续两次失败, 评分作废。
+def _truncated_judge_json() -> str:
+    """线上真实故障形态: 纯 JSON 开头, 在第三条理由中间断掉(没有收尾的 ] })。"""
+    return (
+        '{"score": 62, "verdict": "rewrite", "reasons": ['
+        '"严重度高判: 假设性故障却判 4 级, 缺确定性交错", '
+        '"标题与正文自相矛盾: 正文已承认该行可删除", '
+        '"第三条理由写到一半就被截断了, 没有收尾的引号'
+    )
+
+
+def test_judge_output_budget_is_not_the_old_400():
+    """预算是可配的 judge_max_tokens, 且必须真的传到 chat —— 只写进 config 等于没改。"""
+    llm = MagicMock()
+    llm.chat.return_value = ChatResponse(
+        content='{"score": 90, "verdict": "pass", "reasons": []}',
+        model="m", provider="p", usage={},
+    )
+    judge = Judge(llm=llm, config=QualityConfig())
+    judge.evaluate(ReviewResult(added_lines={}), "diff")
+
+    assert QualityConfig().judge_max_tokens == 1200, "默认预算要让 3 条中文理由装得下"
+    assert llm.chat.call_args.kwargs["max_tokens"] == 1200
+
+
+def test_truncated_judge_output_retries_with_a_bigger_budget():
+    """截断型故障: 重试必须换更大的预算 —— 沿用原预算等于把同一次失败再跑一遍。"""
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(
+            content=_truncated_judge_json(), model="m", provider="p",
+            usage={}, finish_reason="length",
+        ),
+        ChatResponse(
+            content='{"score": 70, "verdict": "pass", "reasons": []}',
+            model="m", provider="p", usage={}, finish_reason="stop",
+        ),
+    ]
+    judge = Judge(llm=llm, config=QualityConfig(judge_max_tokens=400))
+    jr = judge.evaluate(ReviewResult(added_lines={}), "diff")
+
+    assert jr.parse_failed is False
+    first, retry = llm.chat.call_args_list
+    assert first.kwargs["max_tokens"] == 400
+    assert retry.kwargs["max_tokens"] > 400, "截断后必须提高预算"
+    # 预算翻倍(或至少加一个下限), 且不动模型路由
+    assert retry.kwargs["max_tokens"] >= 800
+    assert retry.kwargs.get("model") == first.kwargs.get("model")
+    assert retry.kwargs.get("provider") == first.kwargs.get("provider")
+
+
+def test_truncated_retry_also_asks_for_shorter_reasons():
+    """光加预算不够稳: 同时要求更短的输出(最多 2 条, 每条 ≤60 字)。"""
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(
+            content=_truncated_judge_json(), model="m", provider="p",
+            usage={}, finish_reason="length",
+        ),
+        ChatResponse(
+            content='{"score": 70, "verdict": "pass", "reasons": []}',
+            model="m", provider="p", usage={}, finish_reason="stop",
+        ),
+    ]
+    Judge(llm=llm, config=QualityConfig()).evaluate(ReviewResult(added_lines={}), "diff")
+
+    retry_prompt = " ".join(m["content"] for m in llm.chat.call_args_list[1][0][0])
+    assert "最多 2 条" in retry_prompt
+    assert "截断" in retry_prompt, "要告诉模型上次为什么失败"
+
+
+def test_prose_failure_keeps_the_strict_retry_at_the_same_budget():
+    """反向守卫: 格式跑偏(不是截断)时不得乱加预算 —— 那不是长度问题, 加预算治不了。"""
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(
+            content="这是解释文字, 没有 JSON", model="m", provider="p",
+            usage={}, finish_reason="stop",
+        ),
+        ChatResponse(
+            content='{"score": 77, "verdict": "pass", "reasons": []}',
+            model="m", provider="p", usage={}, finish_reason="stop",
+        ),
+    ]
+    Judge(llm=llm, config=QualityConfig(judge_max_tokens=1200)).evaluate(
+        ReviewResult(added_lines={}), "diff"
+    )
+    first, retry = llm.chat.call_args_list
+    assert retry.kwargs["max_tokens"] == first.kwargs["max_tokens"] == 1200
+    retry_prompt = " ".join(m["content"] for m in retry[0][0])
+    assert "只输出一个 JSON" in retry_prompt
+
+
+def test_judge_fault_records_the_cause():
+    """故障要留下成因(finish_reason/completion_tokens), 否则事后只能猜。"""
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(
+            content=_truncated_judge_json(), model="m", provider="p",
+            usage={"completion_tokens": 400}, finish_reason="length",
+        ),
+        ChatResponse(
+            content=_truncated_judge_json(), model="m", provider="p",
+            usage={"completion_tokens": 400}, finish_reason="length",
+        ),
+    ]
+    jr = Judge(llm=llm, config=QualityConfig(judge_max_tokens=400)).evaluate(
+        ReviewResult(added_lines={}), "diff"
+    )
+    assert jr.parse_failed is True
+    assert jr.finish_reason == "length"
+    assert jr.truncated is True
+    assert jr.completion_tokens == 400
+
+
+def test_judge_archive_is_not_cut_at_500_chars():
+    """留档必须能看出"输出到底写完没有": 旧的 raw[:500] 恰好把故障点截掉了。"""
+    long_tail = "很长的第三条理由" * 200
+    raw = '{"score": 40, "verdict": "rewrite", "reasons": ["a", "' + long_tail
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(content=raw, model="m", provider="p", usage={}, finish_reason="length"),
+        ChatResponse(content=raw, model="m", provider="p", usage={}, finish_reason="length"),
+    ]
+    jr = Judge(llm=llm, config=QualityConfig()).evaluate(ReviewResult(added_lines={}), "diff")
+
+    assert jr.parse_failed is True
+    from pr_review.quality import MAX_RAW_ARCHIVE_CHARS
+
+    assert MAX_RAW_ARCHIVE_CHARS > 500
+    # 两次原文都在, 且每段都远超 500 字(不是被我们自己的留档上限截的)
+    first_part, retry_part = jr.raw.split("[retry]\n")
+    assert len(first_part) > 500 and len(retry_part) > 500
+    assert len(retry_part) <= MAX_RAW_ARCHIVE_CHARS
+
+
+def test_salvaged_reasons_merge_both_attempts():
+    """两次的分歧要点都要留: 首次那份是未被干预的原始形态。"""
+    first = (
+        '{"score": 62, "verdict": "rewrite", "reasons": ['
+        '"首次: 严重度高判(假设性却判 4 级)"'
+    )
+    retry = (
+        '{"score": 62, "verdict": "rewrite", "reasons": ['
+        '"重试: 缺确定性交错", "重试: 第三条理由被截断'
+    )
+    llm = MagicMock()
+    llm.chat.side_effect = [
+        ChatResponse(content=first, model="m", provider="p", usage={}, finish_reason="length"),
+        ChatResponse(content=retry, model="m", provider="p", usage={}, finish_reason="length"),
+    ]
+    jr = Judge(llm=llm, config=QualityConfig()).evaluate(ReviewResult(added_lines={}), "diff")
+
+    assert jr.parse_failed is True
+    assert any("首次" in r for r in jr.salvaged_reasons)
+    assert any("重试" in r for r in jr.salvaged_reasons)
+    assert len(jr.salvaged_reasons) <= 3, "上限仍然 3 条, 别把评论撑爆"
+
+
+def test_truncation_cause_is_named_in_the_comment():
+    """评论要说清成因是"被 max_tokens 截断", 并指出可调的旋钮。"""
+    runner, _, _ = _quality_runner([])
+    result = ReviewResult(model="m", review_no=1)
+    result.quality_parse_failed = True
+    result.quality_verdict = "judge_error"
+    result.quality_finish_reason = "length"
+    result.issues = [_issue(file="a.py", line=1, severity=2)]
+
+    comment = runner.format_comment(result)
+    assert "max_tokens" in comment
+    assert "judge_max_tokens" in comment
+
+    # 反向守卫: 非截断故障不得甩锅给 max_tokens
+    other = ReviewResult(model="m", review_no=2)
+    other.quality_parse_failed = True
+    other.quality_verdict = "judge_error"
+    other.quality_finish_reason = "stop"
+    other.issues = [_issue(file="a.py", line=1, severity=2)]
+    assert "judge_max_tokens" not in runner.format_comment(other)

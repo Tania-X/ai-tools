@@ -62,6 +62,12 @@ class QualityConfig:
     max_rewrites: int = 3
     # judge 输入预算(大 PR 截断用)
     max_judge_input_chars: int = 8000
+    # judge 输出预算(token)。**不能小**: rubric 有 6 个维度, 而它被要求"逐条说明扣分点",
+    # 中文一条理由约 200 字 ≈ 120-200 token, 3 条就吃掉 400。此前硬编码 400 的后果是
+    # 线上 judge 连续两轮都在"第三条理由"中间被截断 → JSON 缺收尾 → 连续解析失败 → 评分不可用。
+    # 参照 review_max_tokens(见下方注释: 连 gateway 默认的 1024 都被判定为"太小"): 给 judge 的
+    # 输出预算不该比审查本体还紧。调大上限不增加成本——输出 token 只在真写出来时才计费。
+    judge_max_tokens: int = 1200
     # linter 交叉验证层(首版仅预留, 未实现; 开启需工作流安装对应 linter)
     lint_enabled: bool = False
     lint_only: list[str] = field(default_factory=lambda: ["py", "go", "js"])
@@ -375,6 +381,12 @@ def load_config(path: str | Path | None = None) -> ReviewConfig:
         cfg.quality_gate.max_rewrites = int(qg.get("max_rewrites", cfg.quality_gate.max_rewrites))
         cfg.quality_gate.max_judge_input_chars = int(
             qg.get("max_judge_input_chars", cfg.quality_gate.max_judge_input_chars)
+        )
+        # judge 输出预算: 与本文件 review_max_tokens 同性质的可调项。
+        # 必须在这里显式加载 —— 只改 QualityConfig 默认值而不读 YAML, 会重演
+        # judge_provider 那次"配置项被静默忽略"的事故(由测试守护)。
+        cfg.quality_gate.judge_max_tokens = int(
+            qg.get("judge_max_tokens", cfg.quality_gate.judge_max_tokens)
         )
         if "lint_enabled" in qg:
             cfg.quality_gate.lint_enabled = bool(qg["lint_enabled"])

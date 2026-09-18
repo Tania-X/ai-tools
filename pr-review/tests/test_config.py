@@ -82,6 +82,7 @@ def test_load_config_quality_gate(tmp_path):
         "  judge_provider: deepseek\n"
         "  pass_score: 60\n"
         "  max_rewrites: 2\n"
+        "  judge_max_tokens: 2000\n"
         "  lint_enabled: true\n",
         encoding="utf-8",
     )
@@ -92,6 +93,9 @@ def test_load_config_quality_gate(tmp_path):
     assert qg.judge_provider == "deepseek"
     assert qg.pass_score == 60
     assert qg.max_rewrites == 2
+    # judge 输出预算: 与 judge_provider 同性质的坑 —— 文档承诺了就必须真读到,
+    # 否则重演"配了但没生效"的静默失败(judge 输出被截断的人为因素就在这里)
+    assert qg.judge_max_tokens == 2000
     assert qg.lint_enabled is True
 
 
@@ -101,6 +105,8 @@ def test_default_quality_gate():
     assert cfg.quality_gate.pass_score == 70
     assert cfg.quality_gate.max_rewrites == 3
     assert cfg.quality_gate.lint_enabled is False  # 首版预留
+    # 400 装不下 3 条中文理由(线上截断事故的根因), 默认值必须留够余量
+    assert cfg.quality_gate.judge_max_tokens >= 1000
 
 
 def test_load_config_warns_when_pyyaml_missing(tmp_path, monkeypatch, caplog):
